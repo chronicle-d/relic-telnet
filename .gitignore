@@ -1,0 +1,14 @@
+build/
+bin/
+compile_commands.json
+.cache/
+
+# Log files and environment
+*.log
+.env
+.env.*
+
+# Optional editor/IDE settings
+.vscode/
+.idea/
+*.swp
