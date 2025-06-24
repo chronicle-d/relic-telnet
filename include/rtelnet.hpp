@@ -44,12 +44,12 @@ inline constexpr int RTELNET_ERROR_NOT_A_NEGOTIATION        = 300;
 namespace rtnt {
 
   inline constexpr unsigned char IAC                    = 255; // Interpret As Command
-  inline constexpr unsigned char DO                     =	253; //	Please use this option
-  inline constexpr unsigned char DONT                   =	254; //	Please don’t use this option
-  inline constexpr unsigned char WILL                   = 251; //	I will use this option
+  inline constexpr unsigned char DO                     = 253; // Please use this option
+  inline constexpr unsigned char DONT                   = 254; // Please don’t use this option
+  inline constexpr unsigned char WILL                   = 251; // I will use this option
   inline constexpr unsigned char WONT                   = 252; // I won’t use this option
-  inline constexpr unsigned char SB                     = 250; //	Begin subnegotiation
-  inline constexpr unsigned char SE                     =	240; //	End subnegotiation
+  inline constexpr unsigned char SB                     = 250; // Begin subnegotiation
+  inline constexpr unsigned char SE                     = 240; // End subnegotiation
   inline constexpr unsigned char BINARY                 = 0;   // Binary transmission (8-bit clean communication)
   inline constexpr unsigned char ECHO                   = 1;   // Echo input back to sender (commonly server-side)
   inline constexpr unsigned char SGA                    = 3;   // Suppress Go Ahead (stream mode instead of line mode)
@@ -116,7 +116,7 @@ namespace rtnt {
       case RTELNET_SUCCESS: return                            "No error.";
       case RTELNET_TCP_ERROR_ADDRESS_NOT_VALID: return        "address is not valid.";
       case RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
-      case RTELNET_TCP_ERROR_CONNECTION_CLOSED_R: return       "Connection closed by remote.";
+      case RTELNET_TCP_ERROR_CONNECTION_CLOSED_R: return      "Connection closed by remote.";
       case RTELNET_TCP_ERROR_NOT_CONNECTED: return            "operation failed, tcp connection was not established.";
       case RTELNET_TCP_ERROR_FAILED_SEND: return              "could not send message.";
       case RTELNET_TCP_ERROR_PARTIAL_SEND: return             "message was sent partially.";
