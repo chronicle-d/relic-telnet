@@ -117,7 +117,7 @@ namespace rtnt {
       case RTELNET_TCP_ERROR_ADDRESS_NOT_VALID: return        "address is not valid.";
       case RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
       case RTELNET_TCP_ERROR_CONNECTION_CLOSED_R: return      "Connection closed by remote.";
-      case RTELNET_TCP_ERROR_NOT_CONNECTED: return            "operation failed, tcp connection was not established.";
+      case RTELNET_TCP_ERROR_NOT_CONNECTED: return            "connection failed, tcp session was not established.";
       case RTELNET_TCP_ERROR_FAILED_SEND: return              "could not send message.";
       case RTELNET_TCP_ERROR_PARTIAL_SEND: return             "message was sent partially.";
 
