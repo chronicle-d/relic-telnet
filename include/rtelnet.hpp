@@ -11,21 +11,25 @@
 #include <netinet/in.h>
 #include <string>
 #include <sys/types.h>
-#include <variant>
 #include <unistd.h>
 #include <vector>
-#include <stdexcept>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <sys/select.h>
 
-#include <iostream>
 #include "debug_helpers.hpp"
 
-inline constexpr int RTELNET_PORT = 23;
-inline constexpr int RTELNET_BUFFER_SIZE = 1024;
-inline constexpr int RTELNET_IP_VERSION = 4;
+inline constexpr int RTELNET_PORT                           = 23;
+inline constexpr int RTELNET_BUFFER_SIZE                    = 1024;
+inline constexpr int RTELNET_IP_VERSION                     = 4;
+inline constexpr int RTELNET_IDLE_TIMEOUT                   = 1000;
+inline constexpr int RTELNET_TOTAL_TIMEOUT                  = 10000;
 
 
 // 0 | 200 > 210 : Relic telnet
 inline constexpr int RTELNET_SUCCESS                        = 0;
+inline constexpr int RTELNET_ERROR_CANT_FIND_EXPECTED       = 201;
 
 // From 1 to 199 - errno errors
 
@@ -39,6 +43,10 @@ inline constexpr int RTELNET_TCP_ERROR_PARTIAL_SEND         = 215;
 
 // 300 > : Telnet logic errors.
 inline constexpr int RTELNET_ERROR_NOT_A_NEGOTIATION        = 300;
+inline constexpr int RTELNET_ERROR_NOT_NEGOTIATED           = 301;
+inline constexpr int RTELNET_ERROR_USERNAME_NOT_SET         = 302;
+inline constexpr int RTELNET_ERROR_PASSWORD_NOT_SET         = 303;
+inline constexpr int RTELNET_ERROR_NOT_LOGGED               = 304;
 
 
 namespace rtnt {
@@ -118,37 +126,21 @@ namespace rtnt {
       case RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
       case RTELNET_TCP_ERROR_CONNECTION_CLOSED_R: return      "Connection closed by remote.";
       case RTELNET_TCP_ERROR_NOT_CONNECTED: return            "connection failed, tcp session was not established.";
-      case RTELNET_TCP_ERROR_FAILED_SEND: return              "could not send message.";
+      case RTELNET_TCP_ERROR_FAILED_SEND: return              "could not send message. (No errno just 0 bytes sent)";
       case RTELNET_TCP_ERROR_PARTIAL_SEND: return             "message was sent partially.";
 
       // Telnet logic errors
       case RTELNET_ERROR_NOT_A_NEGOTIATION: return            "a negotiation was called, yet server did not negotiate.";
+      case RTELNET_ERROR_NOT_NEGOTIATED: return               "negotiation is required, please negotiate first.";
+      case RTELNET_ERROR_NOT_LOGGED: return                   "login is required, please login and try again.";
+
+      // rtelnet specific
+      case RTELNET_ERROR_CANT_FIND_EXPECTED: return           "cannot find expected substring in buffer.";
+      case RTELNET_ERROR_USERNAME_NOT_SET: return             "username was not set in object.";
+      case RTELNET_ERROR_PASSWORD_NOT_SET: return             "password was not set in object.";
+
       default: return                                         "Unknonw error.";
     }
-  }
-
-
-  template<typename T, typename E>
-  class Result {
-    public:
-      Result(const T& value) : _value(value) {}
-      Result(const E& error) : _value(error) {}
-
-      bool is_ok() const { return std::holds_alternative<T>(_value); }
-      bool is_err() const { return std::holds_alternative<E>(_value); }
-
-      T& value() { return std::get<T>(_value); }
-      E& error() { return std::get<E>(_value); }
-
-    private:
-      std::variant<T, E> _value;
-  };
-
-  template<typename T, typename E>
-  T unwrapOrThrow(rtnt::Result<T, E>&& result) {
-      if (result.is_err())
-          throw std::runtime_error(readError(result.error()));
-      return result.value();
   }
 
   class session {
@@ -158,15 +150,15 @@ namespace rtnt {
     int _ipv     = RTELNET_IP_VERSION;
     std::string _username;
     std::string _password;
-    bool _connected = false;
     int _fd;
+    int _idle = RTELNET_IDLE_TIMEOUT;
+    int _timeout = RTELNET_TOTAL_TIMEOUT;
 
     class tcp {
     public:
       tcp(session* owner) : _owner(owner) {}
 
-      Result<sockaddr_in, int> getSocketAddr(const char* address, int port = RTELNET_PORT, int ipVersion = RTELNET_IP_VERSION) const {
-        struct sockaddr_in server_address;
+      unsigned int setSocketAddr(sockaddr_in& server_address, const char* address, int port = RTELNET_PORT, int ipVersion = RTELNET_IP_VERSION) const {
         server_address.sin_family = (ipVersion == 4) ? AF_INET : AF_INET6;
         server_address.sin_port = htons(port);
 
@@ -174,7 +166,7 @@ namespace rtnt {
           return RTELNET_TCP_ERROR_ADDRESS_NOT_VALID;
         }
 
-        return server_address;
+        return RTELNET_SUCCESS;
       }
 
       unsigned int Connect(sockaddr_in& address, int ipVersion = RTELNET_IP_VERSION) {
@@ -193,7 +185,7 @@ namespace rtnt {
         _owner->_connected = false;
       }
 
-      unsigned int Send(const std::vector<unsigned char>& message, int sockfd, int sendFlag = 0) const {
+      unsigned int SendBin(const std::vector<unsigned char>& message, int sockfd, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         errno = 0;
@@ -206,210 +198,345 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      Result<std::vector<unsigned char>, int> Read(int socketfd, int bufferSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
+      unsigned int Send(const std::string& message, int sockfd, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
-        std::vector<unsigned char> buffer(bufferSize);
         errno = 0;
-        ssize_t bytesRead = recv(socketfd, reinterpret_cast<char*>(buffer.data()), buffer.size(), recvFlag);
+        ssize_t bytesSent = send(sockfd, message.data(), message.size(), sendFlag);
+
+        if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
+        if (static_cast<size_t>(bytesSent) != message.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
+        if (bytesSent < 0) return errno;
+
+        return RTELNET_SUCCESS;
+      }
+
+      unsigned int Read(std::vector<unsigned char>& buffer, int socketfd, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
+        if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+
+        buffer.resize(readSize);
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(socketfd, &readfds);
+
+        timeval timeout{};
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        int ready = select(socketfd + 1, &readfds, nullptr, nullptr, &timeout);
+        if (ready < 0) return errno;
+        if (ready == 0) {
+          buffer.clear();
+          return RTELNET_SUCCESS;
+        }
+
+        errno = 0;
+        ssize_t bytesRead = recv(socketfd, reinterpret_cast<char*>(buffer.data()), readSize, recvFlag);
 
         if (bytesRead < 0) return errno;
         if (bytesRead == 0) return RTELNET_TCP_ERROR_CONNECTION_CLOSED_R;
 
         buffer.resize(bytesRead);
-        return buffer;
+        return RTELNET_SUCCESS;
       }
 
     private:
       session* _owner;
     };
 
+    // Read-only accessors
+    bool isConnected() const { return _connected; }
+    bool isNegotiated() const { return _negotiated; }
+    bool isLoggedIn() const { return _logged_in; }
+
     // Constructor that initializes tcp and passes this pointer
     session() : _tcp(this) {}
 
     tcp _tcp;
-  };
 
-  unsigned int Negotiate(session& session) {
-    if (!session._connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+    unsigned int Negotiate() {
+      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
-    bool negotiatedSomething = false;
+      std::vector<unsigned char> buffer;
 
-    while (true) {
+      while (true) {
 
-      // Peek in the buffer
-      auto bufferPeekResult = session._tcp.Read(session._fd, 3, MSG_PEEK);
-      if (bufferPeekResult.is_err()) { return bufferPeekResult.error(); }
-      const auto& bufferPeek = bufferPeekResult.value();
+        // Peek in the buffer
+        unsigned int bufferPeek = _tcp.Read(buffer, _fd, 3, MSG_PEEK);
+        if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
-      printTelnet(bufferPeek, 1);
+        printTelnet(buffer, 1);
 
-      ssize_t n = static_cast<ssize_t>(bufferPeek.size());
-      if (n < 3) return errno;
+        ssize_t n = static_cast<ssize_t>(buffer.size());
+        if (n < 3) return errno;
 
-      // If not a negotiation packet, exit
-      if (bufferPeek[0] != IAC) {
-        if (!negotiatedSomething) {
-          return RTELNET_ERROR_NOT_A_NEGOTIATION;
-        } else {
-          break;
+        // If not a negotiation packet, exit
+        if (buffer[0] != IAC) {
+          if (!_negotiated) {
+            return RTELNET_ERROR_NOT_A_NEGOTIATION;
+          } else {
+            break;
+          }
         }
+
+        // Read the full 3-byte sequence
+        unsigned int bufferResult = _tcp.Read(buffer, _fd, 3);
+        if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
+
+        unsigned char command = buffer[1];
+        unsigned char option  = buffer[2];
+        std::vector<unsigned char> response = {
+          static_cast<unsigned char>(IAC),
+          static_cast<unsigned char>(0),
+          static_cast<unsigned char>(option)
+        };
+
+        switch (command) {
+          case DO:
+            switch (option) {
+              case BINARY:               response[1] = WONT; break;
+              case ECHO:                 response[1] = WONT; break;
+              case SGA:                  response[1] = WONT; break;
+              case STATUS:               response[1] = WONT; break;
+              case TIMING_MARK:          response[1] = WONT; break;
+              case TERMINAL_TYPE:        response[1] = WONT; break;
+              case NAWS:                 response[1] = WONT; break;
+              case LINEMODE:             response[1] = WONT; break;
+              case NEW_ENVIRON:          response[1] = WONT; break;
+              case X_DISPLAY_LOCATION:   response[1] = WONT; break;
+              case LOGOUT:               response[1] = WONT; break;
+              case ENVIRONMENT_OPTION:   response[1] = WONT; break;
+              case AUTHENTICATION:       response[1] = WONT; break;
+              case ENCRYPTION:           response[1] = WONT; break;
+              case RCP:                  response[1] = WONT; break;
+              case NAMS:                 response[1] = WONT; break;
+              case RCTE:                 response[1] = WONT; break;
+              case NAOL:                 response[1] = WONT; break;
+              case NAOP:                 response[1] = WONT; break;
+              case NAOCRD:               response[1] = WONT; break;
+              case NAOHTS:               response[1] = WONT; break;
+              case NAOHTD:               response[1] = WONT; break;
+              case NAOFFD:               response[1] = WONT; break;
+              case NAOVTS:               response[1] = WONT; break;
+              case NAOVTD:               response[1] = WONT; break;
+              case NAOLFD:               response[1] = WONT; break;
+              case EXTEND_ASCII:         response[1] = WONT; break;
+              case BM:                   response[1] = WONT; break;
+              case DET:                  response[1] = WONT; break;
+              case SUPDUP:               response[1] = WONT; break;
+              case SUPDUP_OUTPUT:        response[1] = WONT; break;
+              case SEND_LOCATION:        response[1] = WONT; break;
+              case END_OF_RECORD:        response[1] = WONT; break;
+              case TACACS_UID:           response[1] = WONT; break;
+              case OUTPUT_MARKING:       response[1] = WONT; break;
+              case TTYLOC:               response[1] = WONT; break;
+              case REMOTE_FLOW_CONTROL:  response[1] = WONT; break;
+              case TOGGLE_FLOW_CONTROL:  response[1] = WONT; break;
+              case X3_PAD:               response[1] = WONT; break;
+              case MSDP:                 response[1] = WONT; break;
+              case MSSP:                 response[1] = WONT; break;
+              case ZMP:                  response[1] = WONT; break;
+              case MUX:                  response[1] = WONT; break;
+              case MCCP1:                response[1] = WONT; break;
+              case MCCP2:                response[1] = WONT; break;
+              case GMCP:                 response[1] = WONT; break;
+              case PRAGMA_LOGON:         response[1] = WONT; break;
+              case SSPI_LOGON:           response[1] = WONT; break;
+              case PRAGMA_HEARTBEAT:     response[1] = WONT; break;
+              default:                   response[1] = WONT; break;
+            }
+            break;
+
+          case WILL:
+            switch (option) {
+              case BINARY:               response[1] = DONT; break;
+              case ECHO:                 response[1] = DONT; break;
+              case SGA:                  response[1] = DONT; break;
+              case STATUS:               response[1] = DONT; break;
+              case TIMING_MARK:          response[1] = DONT; break;
+              case TERMINAL_TYPE:        response[1] = DONT; break;
+              case NAWS:                 response[1] = DONT; break;
+              case LINEMODE:             response[1] = DONT; break;
+              case NEW_ENVIRON:          response[1] = DONT; break;
+              case X_DISPLAY_LOCATION:   response[1] = DONT; break;
+              case LOGOUT:               response[1] = DONT; break;
+              case ENVIRONMENT_OPTION:   response[1] = DONT; break;
+              case AUTHENTICATION:       response[1] = DONT; break;
+              case ENCRYPTION:           response[1] = DONT; break;
+              case RCP:                  response[1] = DONT; break;
+              case NAMS:                 response[1] = DONT; break;
+              case RCTE:                 response[1] = DONT; break;
+              case NAOL:                 response[1] = DONT; break;
+              case NAOP:                 response[1] = DONT; break;
+              case NAOCRD:               response[1] = DONT; break;
+              case NAOHTS:               response[1] = DONT; break;
+              case NAOHTD:               response[1] = DONT; break;
+              case NAOFFD:               response[1] = DONT; break;
+              case NAOVTS:               response[1] = DONT; break;
+              case NAOVTD:               response[1] = DONT; break;
+              case NAOLFD:               response[1] = DONT; break;
+              case EXTEND_ASCII:         response[1] = DONT; break;
+              case BM:                   response[1] = DONT; break;
+              case DET:                  response[1] = DONT; break;
+              case SUPDUP:               response[1] = DONT; break;
+              case SUPDUP_OUTPUT:        response[1] = DONT; break;
+              case SEND_LOCATION:        response[1] = DONT; break;
+              case END_OF_RECORD:        response[1] = DONT; break;
+              case TACACS_UID:           response[1] = DONT; break;
+              case OUTPUT_MARKING:       response[1] = DONT; break;
+              case TTYLOC:               response[1] = DONT; break;
+              case REMOTE_FLOW_CONTROL:  response[1] = DONT; break;
+              case TOGGLE_FLOW_CONTROL:  response[1] = DONT; break;
+              case X3_PAD:               response[1] = DONT; break;
+              case MSDP:                 response[1] = DONT; break;
+              case MSSP:                 response[1] = DONT; break;
+              case ZMP:                  response[1] = DONT; break;
+              case MUX:                  response[1] = DONT; break;
+              case MCCP1:                response[1] = DONT; break;
+              case MCCP2:                response[1] = DONT; break;
+              case GMCP:                 response[1] = DONT; break;
+              case PRAGMA_LOGON:         response[1] = DONT; break;
+              case SSPI_LOGON:           response[1] = DONT; break;
+              case PRAGMA_HEARTBEAT:     response[1] = DONT; break;
+              default:                   response[1] = DONT; break;
+            }
+            break;
+
+          case WONT:
+          case DONT:
+            // Add supprt for these later.
+            break;
+        }
+
+        _tcp.SendBin(response, _fd);
+        _negotiated = true;
+        printTelnet(response, 0);
       }
 
-      // Read the full 3-byte sequence
-      auto bufferResult = session._tcp.Read(session._fd, 3);
-      if (bufferResult.is_err()) { return bufferResult.error(); }
-      const auto& buffer = bufferResult.value();
-
-      unsigned char command = buffer[1];
-      unsigned char option  = buffer[2];
-      std::vector<unsigned char> response = {
-        static_cast<unsigned char>(IAC),
-        static_cast<unsigned char>(0),
-        static_cast<unsigned char>(option)
-      };
-
-      switch (command) {
-        case DO:
-          switch (option) {
-            case BINARY:               response[1] = WONT; break;
-            case ECHO:                 response[1] = WONT; break;
-            case SGA:                  response[1] = WONT; break;
-            case STATUS:               response[1] = WONT; break;
-            case TIMING_MARK:          response[1] = WONT; break;
-            case TERMINAL_TYPE:        response[1] = WONT; break;
-            case NAWS:                 response[1] = WONT; break;
-            case LINEMODE:             response[1] = WONT; break;
-            case NEW_ENVIRON:          response[1] = WONT; break;
-            case X_DISPLAY_LOCATION:   response[1] = WONT; break;
-            case LOGOUT:               response[1] = WONT; break;
-            case ENVIRONMENT_OPTION:   response[1] = WONT; break;
-            case AUTHENTICATION:       response[1] = WONT; break;
-            case ENCRYPTION:           response[1] = WONT; break;
-            case RCP:                  response[1] = WONT; break;
-            case NAMS:                 response[1] = WONT; break;
-            case RCTE:                 response[1] = WONT; break;
-            case NAOL:                 response[1] = WONT; break;
-            case NAOP:                 response[1] = WONT; break;
-            case NAOCRD:               response[1] = WONT; break;
-            case NAOHTS:               response[1] = WONT; break;
-            case NAOHTD:               response[1] = WONT; break;
-            case NAOFFD:               response[1] = WONT; break;
-            case NAOVTS:               response[1] = WONT; break;
-            case NAOVTD:               response[1] = WONT; break;
-            case NAOLFD:               response[1] = WONT; break;
-            case EXTEND_ASCII:         response[1] = WONT; break;
-            case BM:                   response[1] = WONT; break;
-            case DET:                  response[1] = WONT; break;
-            case SUPDUP:               response[1] = WONT; break;
-            case SUPDUP_OUTPUT:        response[1] = WONT; break;
-            case SEND_LOCATION:        response[1] = WONT; break;
-            case END_OF_RECORD:        response[1] = WONT; break;
-            case TACACS_UID:           response[1] = WONT; break;
-            case OUTPUT_MARKING:       response[1] = WONT; break;
-            case TTYLOC:               response[1] = WONT; break;
-            case REMOTE_FLOW_CONTROL:  response[1] = WONT; break;
-            case TOGGLE_FLOW_CONTROL:  response[1] = WONT; break;
-            case X3_PAD:               response[1] = WONT; break;
-            case MSDP:                 response[1] = WONT; break;
-            case MSSP:                 response[1] = WONT; break;
-            case ZMP:                  response[1] = WONT; break;
-            case MUX:                  response[1] = WONT; break;
-            case MCCP1:                response[1] = WONT; break;
-            case MCCP2:                response[1] = WONT; break;
-            case GMCP:                 response[1] = WONT; break;
-            case PRAGMA_LOGON:         response[1] = WONT; break;
-            case SSPI_LOGON:           response[1] = WONT; break;
-            case PRAGMA_HEARTBEAT:     response[1] = WONT; break;
-            default:                   response[1] = WONT; break;
-          }
-          break;
-
-        case WILL:
-          switch (option) {
-            case BINARY:               response[1] = DONT; break;
-            case ECHO:                 response[1] = DONT; break;
-            case SGA:                  response[1] = DONT; break;
-            case STATUS:               response[1] = DONT; break;
-            case TIMING_MARK:          response[1] = DONT; break;
-            case TERMINAL_TYPE:        response[1] = DONT; break;
-            case NAWS:                 response[1] = DONT; break;
-            case LINEMODE:             response[1] = DONT; break;
-            case NEW_ENVIRON:          response[1] = DONT; break;
-            case X_DISPLAY_LOCATION:   response[1] = DONT; break;
-            case LOGOUT:               response[1] = DONT; break;
-            case ENVIRONMENT_OPTION:   response[1] = DONT; break;
-            case AUTHENTICATION:       response[1] = DONT; break;
-            case ENCRYPTION:           response[1] = DONT; break;
-            case RCP:                  response[1] = DONT; break;
-            case NAMS:                 response[1] = DONT; break;
-            case RCTE:                 response[1] = DONT; break;
-            case NAOL:                 response[1] = DONT; break;
-            case NAOP:                 response[1] = DONT; break;
-            case NAOCRD:               response[1] = DONT; break;
-            case NAOHTS:               response[1] = DONT; break;
-            case NAOHTD:               response[1] = DONT; break;
-            case NAOFFD:               response[1] = DONT; break;
-            case NAOVTS:               response[1] = DONT; break;
-            case NAOVTD:               response[1] = DONT; break;
-            case NAOLFD:               response[1] = DONT; break;
-            case EXTEND_ASCII:         response[1] = DONT; break;
-            case BM:                   response[1] = DONT; break;
-            case DET:                  response[1] = DONT; break;
-            case SUPDUP:               response[1] = DONT; break;
-            case SUPDUP_OUTPUT:        response[1] = DONT; break;
-            case SEND_LOCATION:        response[1] = DONT; break;
-            case END_OF_RECORD:        response[1] = DONT; break;
-            case TACACS_UID:           response[1] = DONT; break;
-            case OUTPUT_MARKING:       response[1] = DONT; break;
-            case TTYLOC:               response[1] = DONT; break;
-            case REMOTE_FLOW_CONTROL:  response[1] = DONT; break;
-            case TOGGLE_FLOW_CONTROL:  response[1] = DONT; break;
-            case X3_PAD:               response[1] = DONT; break;
-            case MSDP:                 response[1] = DONT; break;
-            case MSSP:                 response[1] = DONT; break;
-            case ZMP:                  response[1] = DONT; break;
-            case MUX:                  response[1] = DONT; break;
-            case MCCP1:                response[1] = DONT; break;
-            case MCCP2:                response[1] = DONT; break;
-            case GMCP:                 response[1] = DONT; break;
-            case PRAGMA_LOGON:         response[1] = DONT; break;
-            case SSPI_LOGON:           response[1] = DONT; break;
-            case PRAGMA_HEARTBEAT:     response[1] = DONT; break;
-            default:                   response[1] = DONT; break;
-          }
-          break;
-
-        case WONT:
-        case DONT:
-          // Add supprt for these later.
-          break;
-      }
-
-      session._tcp.Send(response, session._fd);
-      negotiatedSomething = true;
-      printTelnet(response, 0);
+      return RTELNET_SUCCESS;
     }
 
-    return RTELNET_SUCCESS;
-  }
+    unsigned int Connect() {
+      // Get address
+      sockaddr_in address;
+      unsigned int addressResult = _tcp.setSocketAddr(address, _address, _port,_ipv);
+      if (addressResult != 0 ) { return addressResult; }
 
-  unsigned int Connect(session& session) {    
-    // Get address
-    auto addressResult = session._tcp.getSocketAddr(session._address, session._port,session._ipv);
-    if (addressResult.is_err()) { return addressResult.error(); }
-    sockaddr_in address = addressResult.value();
+      int fd = _tcp.Connect(address);
+      if (fd < 0) { return fd; }
+      _fd = fd;
+      
+      int negotiateStatus = Negotiate();
+      if (negotiateStatus != RTELNET_SUCCESS) return negotiateStatus;
 
-    int fd = session._tcp.Connect(address);
-    if (fd < 0) { return fd; }
-    session._fd = fd;
+      return RTELNET_SUCCESS;
+    }
+
+    unsigned int Login() {
+      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+      if (_username.empty()) return RTELNET_ERROR_USERNAME_NOT_SET;
+      if (_password.empty()) return RTELNET_ERROR_PASSWORD_NOT_SET;
+
+      std::vector<unsigned char> buffer;
+
+      // Enter login
+      buffer.clear();
+      unsigned int loginStatus = expectOutput("login:", buffer);
+      if (loginStatus != RTELNET_SUCCESS) return loginStatus;
+      unsigned int loginResponse = _tcp.Send(_username + "\n", _fd);
+      if (loginResponse != RTELNET_SUCCESS) return loginResponse;
+
+      // Enter password
+      buffer.clear();
+      unsigned int passwordStatus = expectOutput("Password:", buffer);
+      if (passwordStatus != RTELNET_SUCCESS) return passwordStatus;
+      unsigned int passwordResponse = _tcp.Send(_password + "\n", _fd);
+      if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
+
+      _logged_in = true;
+ 
+      return RTELNET_SUCCESS;
+    }
+
+    unsigned int Execute(const std::string& command, std::string& buffer) {
+      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+      if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
+
+      unsigned int sendStatus = _tcp.Send(command + "\n", _fd);
+      if (sendStatus != RTELNET_SUCCESS) return sendStatus;
+
+      std::vector<unsigned char> output;
+      buffer.clear();
+
+      auto startTime = std::chrono::steady_clock::now();
+      auto lastRead = startTime;
+
+      while (true) {
+        unsigned int readStatus = _tcp.Read(output, _fd);
+        if (readStatus != RTELNET_SUCCESS) return readStatus;
+
+        if (!output.empty()) {
+          buffer.append(reinterpret_cast<const char*>(output.data()), output.size());
+          lastRead = std::chrono::steady_clock::now();
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRead).count();
+        auto total = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
+
+        if (idle > _idle || total > _timeout) break;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
     
-    int negotiateStatus = Negotiate(session);
-    if (negotiateStatus != 0) return negotiateStatus;
+      return RTELNET_SUCCESS;
+    }
 
-    std::cout << "Done.\n";
+    unsigned int FlushBunner() {
+      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+      if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
+      
+      std::string buffer;
+      unsigned int execStatus = Execute("\n", buffer);
+      if (execStatus != RTELNET_SUCCESS) return execStatus;
 
-    return RTELNET_SUCCESS;
-  }
+      return RTELNET_SUCCESS;
+    }
+
+  private:
+    bool _connected = false;
+    bool _negotiated = false;
+    bool _logged_in = false;
+
+    unsigned int expectOutput(const std::string& expect, std::vector<unsigned char>& buffer) {
+        if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+        if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+
+        for (int i = 0; i < 300; ++i) {
+          unsigned int readStatus = _tcp.Read(buffer, _fd);
+          if (readStatus != RTELNET_SUCCESS) return readStatus;
+
+          std::string cleanedBuffer(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+
+          cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\r'), cleanedBuffer.end());
+          cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\n'), cleanedBuffer.end());
+
+          if (cleanedBuffer.find(expect) != std::string::npos) {
+              return RTELNET_SUCCESS;
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        return RTELNET_ERROR_CANT_FIND_EXPECTED;
+    }
+
+    friend class tcp;
+  };
+  
 }
 #endif // RTELNET_H
