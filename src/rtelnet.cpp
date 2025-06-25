@@ -29,11 +29,12 @@ int main(int argc, char *argv[]) {
     unsigned int loginSuccess = Session.Login();
     if (loginSuccess != RTELNET_SUCCESS) { std::cerr << "[LOGGIN_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
 
-    unsigned int flushSuccess = Session.FlushBunner();
+    unsigned int flushSuccess = Session.FlushBanner();
+    if (flushSuccess != RTELNET_SUCCESS) { std::cerr << "[FLUSH_BANNER_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
 
     std::string buffer;
     unsigned int execSuccess = Session.Execute("ls -al", buffer);
-    if (execSuccess != RTELNET_SUCCESS) { std::cerr << "[ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
+    if (execSuccess != RTELNET_SUCCESS) { std::cerr << "[EXEC_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
 
     std::cout << buffer << "\n";
 

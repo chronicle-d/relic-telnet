@@ -495,7 +495,7 @@ namespace rtnt {
       return RTELNET_SUCCESS;
     }
 
-    unsigned int FlushBunner() {
+    unsigned int FlushBanner() {
       if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
       if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
       if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
