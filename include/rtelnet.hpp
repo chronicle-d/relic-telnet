@@ -150,7 +150,6 @@ namespace rtnt {
     int _ipv     = RTELNET_IP_VERSION;
     std::string _username;
     std::string _password;
-    int _fd;
     int _idle = RTELNET_IDLE_TIMEOUT;
     int _timeout = RTELNET_TOTAL_TIMEOUT;
 
@@ -158,19 +157,19 @@ namespace rtnt {
     public:
       tcp(session* owner) : _owner(owner) {}
 
-      unsigned int setSocketAddr(sockaddr_in& server_address, const char* address, int port = RTELNET_PORT, int ipVersion = RTELNET_IP_VERSION) const {
-        server_address.sin_family = (ipVersion == 4) ? AF_INET : AF_INET6;
-        server_address.sin_port = htons(port);
+      unsigned int setSocketAddr(sockaddr_in& server_address) const {
+        server_address.sin_family = (_owner->_ipv == 4) ? AF_INET : AF_INET6;
+        server_address.sin_port = htons(_owner->_port);
 
-        if (inet_pton(AF_INET, address, &server_address.sin_addr) <= 0) {
+        if (inet_pton(AF_INET, _owner->_address, &server_address.sin_addr) <= 0) {
           return RTELNET_TCP_ERROR_ADDRESS_NOT_VALID;
         }
 
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Connect(sockaddr_in& address, int ipVersion = RTELNET_IP_VERSION) {
-        int sockfd = socket((ipVersion == 4) ? AF_INET : AF_INET6, SOCK_STREAM, 0);
+      unsigned int Connect(sockaddr_in& address) {
+        int sockfd = socket((_owner->_ipv == 4) ? AF_INET : AF_INET6, SOCK_STREAM, 0);
         if (sockfd < 0) return RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD;
 
         errno = 0;
@@ -180,16 +179,16 @@ namespace rtnt {
         return sockfd;
       }
 
-      void Close(int sockfd) {
-        close(sockfd);
+      void Close() {
+        close(_owner->_fd);
         _owner->_connected = false;
       }
 
-      unsigned int SendBin(const std::vector<unsigned char>& message, int sockfd, int sendFlag = 0) const {
+      unsigned int SendBin(const std::vector<unsigned char>& message, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         errno = 0;
-        ssize_t bytesSent = send(sockfd, message.data(), message.size(), sendFlag);
+        ssize_t bytesSent = send(_owner->_fd, message.data(), message.size(), sendFlag);
 
         if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
         if (static_cast<size_t>(bytesSent) != message.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
@@ -198,11 +197,11 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Send(const std::string& message, int sockfd, int sendFlag = 0) const {
+      unsigned int Send(const std::string& message, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         errno = 0;
-        ssize_t bytesSent = send(sockfd, message.data(), message.size(), sendFlag);
+        ssize_t bytesSent = send(_owner->_fd, message.data(), message.size(), sendFlag);
 
         if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
         if (static_cast<size_t>(bytesSent) != message.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
@@ -211,20 +210,20 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Read(std::vector<unsigned char>& buffer, int socketfd, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
+      unsigned int Read(std::vector<unsigned char>& buffer, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         buffer.resize(readSize);
 
         fd_set readfds;
         FD_ZERO(&readfds);
-        FD_SET(socketfd, &readfds);
+        FD_SET(_owner->_fd, &readfds);
 
         timeval timeout{};
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
 
-        int ready = select(socketfd + 1, &readfds, nullptr, nullptr, &timeout);
+        int ready = select(_owner->_fd + 1, &readfds, nullptr, nullptr, &timeout);
         if (ready < 0) return errno;
         if (ready == 0) {
           buffer.clear();
@@ -232,7 +231,7 @@ namespace rtnt {
         }
 
         errno = 0;
-        ssize_t bytesRead = recv(socketfd, reinterpret_cast<char*>(buffer.data()), readSize, recvFlag);
+        ssize_t bytesRead = recv(_owner->_fd, reinterpret_cast<char*>(buffer.data()), readSize, recvFlag);
 
         if (bytesRead < 0) return errno;
         if (bytesRead == 0) return RTELNET_TCP_ERROR_CONNECTION_CLOSED_R;
@@ -263,7 +262,7 @@ namespace rtnt {
       while (true) {
 
         // Peek in the buffer
-        unsigned int bufferPeek = _tcp.Read(buffer, _fd, 3, MSG_PEEK);
+        unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
         printTelnet(buffer, 1);
@@ -281,7 +280,7 @@ namespace rtnt {
         }
 
         // Read the full 3-byte sequence
-        unsigned int bufferResult = _tcp.Read(buffer, _fd, 3);
+        unsigned int bufferResult = _tcp.Read(buffer, 3);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
         unsigned char command = buffer[1];
@@ -409,7 +408,7 @@ namespace rtnt {
             break;
         }
 
-        _tcp.SendBin(response, _fd);
+        _tcp.SendBin(response);
         _negotiated = true;
         printTelnet(response, 0);
       }
@@ -420,7 +419,7 @@ namespace rtnt {
     unsigned int Connect() {
       // Get address
       sockaddr_in address;
-      unsigned int addressResult = _tcp.setSocketAddr(address, _address, _port,_ipv);
+      unsigned int addressResult = _tcp.setSocketAddr(address);
       if (addressResult != 0 ) { return addressResult; }
 
       int fd = _tcp.Connect(address);
@@ -445,14 +444,14 @@ namespace rtnt {
       buffer.clear();
       unsigned int loginStatus = expectOutput("login:", buffer);
       if (loginStatus != RTELNET_SUCCESS) return loginStatus;
-      unsigned int loginResponse = _tcp.Send(_username + "\n", _fd);
+      unsigned int loginResponse = _tcp.Send(_username + "\n");
       if (loginResponse != RTELNET_SUCCESS) return loginResponse;
 
       // Enter password
       buffer.clear();
       unsigned int passwordStatus = expectOutput("Password:", buffer);
       if (passwordStatus != RTELNET_SUCCESS) return passwordStatus;
-      unsigned int passwordResponse = _tcp.Send(_password + "\n", _fd);
+      unsigned int passwordResponse = _tcp.Send(_password + "\n");
       if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
 
       _logged_in = true;
@@ -465,7 +464,7 @@ namespace rtnt {
       if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
       if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
 
-      unsigned int sendStatus = _tcp.Send(command + "\n", _fd);
+      unsigned int sendStatus = _tcp.Send(command + "\n");
       if (sendStatus != RTELNET_SUCCESS) return sendStatus;
 
       std::vector<unsigned char> output;
@@ -475,7 +474,7 @@ namespace rtnt {
       auto lastRead = startTime;
 
       while (true) {
-        unsigned int readStatus = _tcp.Read(output, _fd);
+        unsigned int readStatus = _tcp.Read(output);
         if (readStatus != RTELNET_SUCCESS) return readStatus;
 
         if (!output.empty()) {
@@ -511,13 +510,14 @@ namespace rtnt {
     bool _connected = false;
     bool _negotiated = false;
     bool _logged_in = false;
+    int _fd;
 
     unsigned int expectOutput(const std::string& expect, std::vector<unsigned char>& buffer) {
         if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
         if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
 
         for (int i = 0; i < 300; ++i) {
-          unsigned int readStatus = _tcp.Read(buffer, _fd);
+          unsigned int readStatus = _tcp.Read(buffer);
           if (readStatus != RTELNET_SUCCESS) return readStatus;
 
           std::string cleanedBuffer(reinterpret_cast<const char*>(buffer.data()), buffer.size());

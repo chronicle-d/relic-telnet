@@ -42,6 +42,6 @@ int main(int argc, char *argv[]) {
     std::cerr << "[ERROR]: " << e.what() << "\n";
   }
 
-  Session._tcp.Close(Session._fd);
+  Session._tcp.Close();
   return 0;
 }
