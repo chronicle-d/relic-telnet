@@ -47,6 +47,7 @@ inline constexpr int RTELNET_ERROR_NOT_NEGOTIATED           = 301;
 inline constexpr int RTELNET_ERROR_USERNAME_NOT_SET         = 302;
 inline constexpr int RTELNET_ERROR_PASSWORD_NOT_SET         = 303;
 inline constexpr int RTELNET_ERROR_NOT_LOGGED               = 304;
+inline constexpr int RTELNET_ERROR_FAILED_LOGIN             = 305;
 
 
 namespace rtnt {
@@ -118,7 +119,7 @@ namespace rtnt {
   inline constexpr unsigned char SSPI_LOGON             = 139; // SSPI-based login (Microsoft)
   inline constexpr unsigned char PRAGMA_HEARTBEAT       = 140; // Keep-alive negotiation
 
-  std::string readError(int rtntErrno) {
+  inline std::string readError(int rtntErrno) {
     if (rtntErrno < 200) { return strerror(errno); }
     switch (rtntErrno) {
       case RTELNET_SUCCESS: return                            "No error.";
@@ -133,6 +134,7 @@ namespace rtnt {
       case RTELNET_ERROR_NOT_A_NEGOTIATION: return            "a negotiation was called, yet server did not negotiate.";
       case RTELNET_ERROR_NOT_NEGOTIATED: return               "negotiation is required, please negotiate first.";
       case RTELNET_ERROR_NOT_LOGGED: return                   "login is required, please login and try again.";
+      case RTELNET_ERROR_FAILED_LOGIN: return                 "login failed, username or password are wrong.";
 
       // rtelnet specific
       case RTELNET_ERROR_CANT_FIND_EXPECTED: return           "cannot find expected substring in buffer.";
@@ -153,11 +155,33 @@ namespace rtnt {
     int _idle = RTELNET_IDLE_TIMEOUT;
     int _timeout = RTELNET_TOTAL_TIMEOUT;
 
+    session(
+      const char* address,
+      const std::string username,
+      const std::string password,
+      int port = RTELNET_PORT,
+      int ipv = RTELNET_IP_VERSION,
+      int idle = RTELNET_IDLE_TIMEOUT,
+      int timeout = RTELNET_TOTAL_TIMEOUT
+    ) : 
+      _address(address),
+      _username(username),
+      _password(password),
+      _port(port),
+      _ipv(ipv),
+      _idle(idle),
+      _timeout(timeout),
+      _tcp(this) {}
+
+    ~session() {
+      close(_fd);
+    }
+
     class tcp {
     public:
       tcp(session* owner) : _owner(owner) {}
 
-      unsigned int setSocketAddr(sockaddr_in& server_address) const {
+      inline unsigned int setSocketAddr(sockaddr_in& server_address) const {
         server_address.sin_family = (_owner->_ipv == 4) ? AF_INET : AF_INET6;
         server_address.sin_port = htons(_owner->_port);
 
@@ -168,7 +192,7 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Connect(sockaddr_in& address) {
+      inline unsigned int Connect(sockaddr_in& address) {
         int sockfd = socket((_owner->_ipv == 4) ? AF_INET : AF_INET6, SOCK_STREAM, 0);
         if (sockfd < 0) return RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD;
 
@@ -184,7 +208,7 @@ namespace rtnt {
         _owner->_connected = false;
       }
 
-      unsigned int SendBin(const std::vector<unsigned char>& message, int sendFlag = 0) const {
+      inline unsigned int SendBin(const std::vector<unsigned char>& message, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         errno = 0;
@@ -197,7 +221,7 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Send(const std::string& message, int sendFlag = 0) const {
+      inline unsigned int Send(const std::string& message, int sendFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         std::vector<unsigned char> buffer;
@@ -219,7 +243,7 @@ namespace rtnt {
         return RTELNET_SUCCESS;
       }
 
-      unsigned int Read(std::vector<unsigned char>& buffer, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
+      inline unsigned int Read(std::vector<unsigned char>& buffer, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
         if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
         buffer.resize(readSize);
@@ -254,16 +278,13 @@ namespace rtnt {
     };
 
     // Read-only accessors
-    bool isConnected() const { return _connected; }
-    bool isNegotiated() const { return _negotiated; }
-    bool isLoggedIn() const { return _logged_in; }
-
-    // Constructor that initializes tcp and passes this pointer
-    session() : _tcp(this) {}
+    inline bool isConnected() const { return _connected; }
+    inline bool isNegotiated() const { return _negotiated; }
+    inline bool isLoggedIn() const { return _logged_in; }
 
     tcp _tcp;
 
-    unsigned int Connect() {
+    inline unsigned int Connect() {
       // Get address
       sockaddr_in address;
       unsigned int addressResult = _tcp.setSocketAddr(address);
@@ -276,33 +297,9 @@ namespace rtnt {
       int negotiateStatus = Negotiate();
       if (negotiateStatus != RTELNET_SUCCESS) return negotiateStatus;
 
-      return RTELNET_SUCCESS;
-    }
-
-    unsigned int Login() {
-      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
-      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
-      if (_username.empty()) return RTELNET_ERROR_USERNAME_NOT_SET;
-      if (_password.empty()) return RTELNET_ERROR_PASSWORD_NOT_SET;
-
-      std::vector<unsigned char> buffer;
-
-      // Enter login
-      buffer.clear();
-      unsigned int loginStatus = expectOutput("login:", buffer);
+      int loginStatus = Login();
       if (loginStatus != RTELNET_SUCCESS) return loginStatus;
-      unsigned int loginResponse = _tcp.Send(_username + "\n");
-      if (loginResponse != RTELNET_SUCCESS) return loginResponse;
 
-      // Enter password
-      buffer.clear();
-      unsigned int passwordStatus = expectOutput("Password:", buffer);
-      if (passwordStatus != RTELNET_SUCCESS) return passwordStatus;
-      unsigned int passwordResponse = _tcp.Send(_password + "\n");
-      if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
-
-      _logged_in = true;
- 
       return RTELNET_SUCCESS;
     }
 
@@ -341,7 +338,7 @@ namespace rtnt {
       return RTELNET_SUCCESS;
     }
 
-    unsigned int FlushBanner() {
+    inline unsigned int FlushBanner() {
       if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
       if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
       if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
@@ -545,8 +542,40 @@ namespace rtnt {
         return RTELNET_ERROR_CANT_FIND_EXPECTED;
     }
 
+    inline unsigned int Login() {
+      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+      if (_username.empty()) return RTELNET_ERROR_USERNAME_NOT_SET;
+      if (_password.empty()) return RTELNET_ERROR_PASSWORD_NOT_SET;
+
+      std::vector<unsigned char> buffer;
+
+      // Enter login
+      buffer.clear();
+      unsigned int loginStatus = expectOutput("login:", buffer);
+      if (loginStatus != RTELNET_SUCCESS) return loginStatus;
+      unsigned int loginResponse = _tcp.Send(_username + "\n");
+      if (loginResponse != RTELNET_SUCCESS) return loginResponse;
+
+      // Enter password
+      buffer.clear();
+      unsigned int passwordStatus = expectOutput("Password:", buffer);
+      if (passwordStatus != RTELNET_SUCCESS) return passwordStatus;
+      unsigned int passwordResponse = _tcp.Send(_password + "\n");
+      if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
+
+      // Search for "Login incorrect"
+      buffer.clear();
+      unsigned int checkStatus = expectOutput("Login incorrect", buffer);
+      if (checkStatus == RTELNET_SUCCESS) return RTELNET_ERROR_FAILED_LOGIN;
+
+      _logged_in = true;
+
+      return RTELNET_SUCCESS;
+    }
+
     friend class tcp;
   };
-  
+
 }
 #endif // RTELNET_H

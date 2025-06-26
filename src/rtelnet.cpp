@@ -12,28 +12,19 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  rtnt::session Session;
-
-  Session._address = argv[1];
-  Session._port = std::atoi(argv[2]);
-  Session._username = "example";
-  Session._password = "[nM3r2>W31S_";
+  rtnt::session Session(argv[1], "example", "[nM3r2>W31S_", std::atoi(argv[2]));
 
   unsigned int connectSuccess = Session.Connect();
   if (connectSuccess != RTELNET_SUCCESS) { std::cerr << "[CONNECTION_ERROR]: " << rtnt::readError(connectSuccess) << "\n"; return 1; }
 
-  unsigned int loginSuccess = Session.Login();
-  if (loginSuccess != RTELNET_SUCCESS) { std::cerr << "[LOGGIN_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
-
   unsigned int flushSuccess = Session.FlushBanner();
-  if (flushSuccess != RTELNET_SUCCESS) { std::cerr << "[FLUSH_BANNER_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
+  if (flushSuccess != RTELNET_SUCCESS) { std::cerr << "[FLUSH_BANNER_ERROR]: " << rtnt::readError(flushSuccess) << "\n"; return 1; }
 
   std::string buffer;
   unsigned int execSuccess = Session.Execute("ls -al", buffer);
-  if (execSuccess != RTELNET_SUCCESS) { std::cerr << "[EXEC_ERROR]: " << rtnt::readError(loginSuccess) << "\n"; return 1; }
+  if (execSuccess != RTELNET_SUCCESS) { std::cerr << "[EXEC_ERROR]: " << rtnt::readError(execSuccess) << "\n"; return 1; }
 
   std::cout << buffer << "\n";
 
-  Session._tcp.Close();
   return 0;
 }
