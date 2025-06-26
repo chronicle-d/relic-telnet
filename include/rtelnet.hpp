@@ -1,5 +1,11 @@
 /*
 * Relic Telnet is a header only telnet client implementation.
+*
+* Debug levels:
+* 1. Only log each major step. (.i.e Login, Negotiate)
+* 2. Add paramets to each major step.
+* 3. Login telnet commands & tcp session related major steps.
+* 4. Log steps in each major step. (.i.e inside Login, "Waiting for login prompt")
 */
 #ifndef RTELNET_H
 #define RTELNET_H
@@ -17,14 +23,41 @@
 #include <chrono>
 #include <thread>
 #include <sys/select.h>
+#include <map>
 
 #include "debug_helpers.hpp"
+
+#define LV(x) #x, x
 
 inline constexpr int RTELNET_PORT                           = 23;
 inline constexpr int RTELNET_BUFFER_SIZE                    = 1024;
 inline constexpr int RTELNET_IP_VERSION                     = 4;
 inline constexpr int RTELNET_IDLE_TIMEOUT                   = 1000;
 inline constexpr int RTELNET_TOTAL_TIMEOUT                  = 10000;
+inline constexpr int RTELNET_DEBUG                          = 0;
+
+// Log titles
+inline constexpr const char* RTELNET_LOG_TCP_SET_ADDR = "TCP => SETTING SOCKET ADDRESS";
+inline constexpr const char* RTELNET_LOG_TCP_CONNECT = "TCP => CONNECTING TO SOCKET";
+inline constexpr const char* RTELNET_LOG_TCP_CLOSE = "TCP => CLOSING SOCKET";
+inline constexpr const char* RTELNET_LOG_TCP_SEND_BIN = "TCP => SEND BIN";
+inline constexpr const char* RTELNET_LOG_TCP_SEND = "TCP => SEND";
+inline constexpr const char* RTELNET_LOG_TCP_READ = "TCP => READ";
+inline constexpr const char* RTELNET_LOG_CONNECT = "CONNECT";
+inline constexpr const char* RTELNET_LOG_EXECUTE = "EXECITE";
+inline constexpr const char* RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
+inline constexpr const char* RTELNET_LOG_LOGIN = "LOGIN";
+
+
+
+
+
+
+
+
+
+
+
 
 
 // 0 | 200 > 210 : Relic telnet
@@ -147,9 +180,10 @@ namespace rtnt {
 
   class session {
   public:
-    int _port    = RTELNET_PORT;
+    int _port = RTELNET_PORT;
     const char* _address;
-    int _ipv     = RTELNET_IP_VERSION;
+    int _ipv = RTELNET_IP_VERSION;
+    int _debug = RTELNET_DEBUG;
     std::string _username;
     std::string _password;
     int _idle = RTELNET_IDLE_TIMEOUT;
@@ -161,6 +195,7 @@ namespace rtnt {
       const std::string password,
       int port = RTELNET_PORT,
       int ipv = RTELNET_IP_VERSION,
+      int debug = RTELNET_DEBUG,
       int idle = RTELNET_IDLE_TIMEOUT,
       int timeout = RTELNET_TOTAL_TIMEOUT
     ) : 
@@ -169,13 +204,115 @@ namespace rtnt {
       _password(password),
       _port(port),
       _ipv(ipv),
+      _debug(debug),
       _idle(idle),
       _timeout(timeout),
-      _tcp(this) {}
+      _tcp(this),
+      _logger(this) {}
 
     ~session() {
       close(_fd);
     }
+
+    class Logger {
+    public:
+      Logger(session* owner) : _owner(owner) {}
+
+      template <typename T, typename... Rest>
+      void log(const std::string& title, const std::string& message, int level,
+              const std::string& name1, const T& val1, const Rest&... rest) {
+        if (_owner->_debug < level) return;
+
+        std::cout << "\033[1;97m[\033[0m\033[1;96m"
+                  << title
+                  << "\033[0m\033[1;97m]:\033[0m "
+                  << message
+                  << " (";
+        
+        print_named_args(true, name1, val1, rest...);
+
+        std::cout << ")" << std::endl;
+      }
+
+      // --- Simple version for just message
+      inline void log(const std::string& title, const std::string& message, int level) {
+        if (_owner->_debug < level) return;
+
+        std::cout << "\033[1;97m[\033[0m\033[1;96m"
+                  << title
+                  << "\033[0m\033[1;97m]:\033[0m "
+                  << message
+                  << std::endl;
+      }
+
+    private:
+      session* _owner;
+
+      template <typename T>
+      void print_named_arg(const std::string& name, const T& value, bool isFirst) {
+        if (!isFirst) std::cout << ", ";
+        std::cout << name << ": " << value;
+      }
+
+      template <typename T>
+      void print_named_arg(const std::string& name, const std::vector<T>& value, bool isFirst) {
+        if (!isFirst) std::cout << ", ";
+        std::cout << name << ": <";
+        for (size_t i = 0; i < value.size(); ++i) {
+          std::cout << value[i];
+          if (i + 1 < value.size()) std::cout << ", ";
+        }
+        std::cout << ">";
+      }
+
+      inline void print_named_arg(const std::string& name, const std::vector<unsigned char>& value, bool isFirst) {
+        if (!isFirst) std::cout << ", ";
+        std::cout << name << ": <";
+        for (size_t i = 0; i < value.size(); ++i) {
+          std::cout << static_cast<int>(value[i]);
+          if (i + 1 < value.size()) std::cout << ", ";
+        }
+        std::cout << ">";
+      }
+
+      inline void print_named_arg(const std::string& name, const std::string& value, bool isFirst) {
+        if (!isFirst) std::cout << ", ";
+        std::cout << name << ": \"";
+        for (char c : value) {
+          switch (c) {
+            case '\\': std::cout << "\\\\"; break;
+            case '\n': std::cout << "\\n"; break;
+            case '\t': std::cout << "\\t"; break;
+            case '\r': std::cout << "\\r"; break;
+            default: std::cout << c; break;
+          }
+        }
+        std::cout << "\"";
+      }
+
+
+
+      template <typename K, typename V>
+      void print_named_arg(const std::string& name, const std::map<K, V>& value, bool isFirst) {
+        if (!isFirst) std::cout << ", ";
+        std::cout << name << ": <";
+        size_t count = 0;
+        for (const auto& [k, v] : value) {
+          std::cout << k << ": " << v;
+          if (++count < value.size()) std::cout << ", ";
+        }
+        std::cout << ">";
+      }
+
+      inline void print_named_args(bool) {}
+
+      template <typename T, typename... Rest>
+      void print_named_args(bool isFirst, const std::string& name, const T& value, const Rest&... rest) {
+        print_named_arg(name, value, isFirst);
+        print_named_args(false, rest...);
+      }
+    };
+
 
     class tcp {
     public:
@@ -188,6 +325,8 @@ namespace rtnt {
         if (inet_pton(AF_INET, _owner->_address, &server_address.sin_addr) <= 0) {
           return RTELNET_TCP_ERROR_ADDRESS_NOT_VALID;
         }
+        
+        _owner->_logger.log(RTELNET_LOG_TCP_SET_ADDR, "Successfully set socket address.", 4, LV(_owner->_address), LV(_owner->_port));
 
         return RTELNET_SUCCESS;
       }
@@ -199,12 +338,15 @@ namespace rtnt {
         errno = 0;
         if (connect(sockfd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) { return errno; }
 
+        _owner->_logger.log(RTELNET_LOG_TCP_CONNECT, "Successfully connected.", 4, LV(_owner->_address), LV(_owner->_port));
+        
         _owner->_connected = true;
         return sockfd;
       }
 
       void Close() {
-        close(_owner->_fd);
+        close(_owner->_fd); 
+        _owner->_logger.log(RTELNET_LOG_TCP_CLOSE, "Closed socket.", 4);
         _owner->_connected = false;
       }
 
@@ -217,6 +359,8 @@ namespace rtnt {
         if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
         if (static_cast<size_t>(bytesSent) != message.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
         if (bytesSent < 0) return errno;
+
+        _owner->_logger.log(RTELNET_LOG_TCP_SEND_BIN, "Successfully sent message.", 4, LV(message), LV(sendFlag));
 
         return RTELNET_SUCCESS;
       }
@@ -239,6 +383,8 @@ namespace rtnt {
         if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
         if (bytesSent < 0) return errno;
         if (static_cast<size_t>(bytesSent) != buffer.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
+
+        _owner->_logger.log(RTELNET_LOG_TCP_SEND, "Successfully sent message.", 4, LV(message), LV(sendFlag));
 
         return RTELNET_SUCCESS;
       }
@@ -270,6 +416,9 @@ namespace rtnt {
         if (bytesRead == 0) return RTELNET_TCP_ERROR_CONNECTION_CLOSED_R;
 
         buffer.resize(bytesRead);
+
+        _owner->_logger.log(RTELNET_LOG_TCP_READ, "Successfully read.", 4, LV(buffer), LV(readSize), LV(recvFlag));
+
         return RTELNET_SUCCESS;
       }
 
@@ -283,8 +432,12 @@ namespace rtnt {
     inline bool isLoggedIn() const { return _logged_in; }
 
     tcp _tcp;
+    Logger _logger;
 
     inline unsigned int Connect() {
+
+      _logger.log(RTELNET_LOG_CONNECT, "Trying to connnected to telnet server.", 2, LV(_address), LV(_port));
+
       // Get address
       sockaddr_in address;
       unsigned int addressResult = _tcp.setSocketAddr(address);
@@ -300,6 +453,8 @@ namespace rtnt {
       int loginStatus = Login();
       if (loginStatus != RTELNET_SUCCESS) return loginStatus;
 
+      _logger.log(RTELNET_LOG_CONNECT, "Connected to telnet server.", 2, _address, _port);
+
       return RTELNET_SUCCESS;
     }
 
@@ -307,6 +462,8 @@ namespace rtnt {
       if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
       if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
       if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
+
+      _logger.log(RTELNET_LOG_EXECUTE, "Trying to execute a command.", 2, LV(command));
 
       unsigned int sendStatus = _tcp.Send(command + "\n");
       if (sendStatus != RTELNET_SUCCESS) return sendStatus;
@@ -334,7 +491,9 @@ namespace rtnt {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
-    
+
+      _logger.log(RTELNET_LOG_EXECUTE, "Executed command successfully.", 2, LV(command));
+
       return RTELNET_SUCCESS;
     }
 
@@ -359,6 +518,8 @@ namespace rtnt {
     unsigned int Negotiate() {
       if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
+      _logger.log(RTELNET_LOG_NEGOTIATE, "Trying to negotiate.", 2);
+
       std::vector<unsigned char> buffer;
 
       while (true) {
@@ -367,7 +528,7 @@ namespace rtnt {
         unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
-        printTelnet(buffer, 1);
+        // printTelnet(buffer, 1);
 
         ssize_t n = static_cast<ssize_t>(buffer.size());
         if (n < 3) return errno;
@@ -512,8 +673,10 @@ namespace rtnt {
 
         _tcp.SendBin(response);
         _negotiated = true;
-        printTelnet(response, 0);
+        // printTelnet(response, 0);
       }
+
+      _logger.log(RTELNET_LOG_NEGOTIATE, "Finished negotiation sequence.", 2);
 
       return RTELNET_SUCCESS;
     }
@@ -548,6 +711,8 @@ namespace rtnt {
       if (_username.empty()) return RTELNET_ERROR_USERNAME_NOT_SET;
       if (_password.empty()) return RTELNET_ERROR_PASSWORD_NOT_SET;
 
+      _logger.log(RTELNET_LOG_LOGIN, "Trying to login.", 2, LV(_username), LV(_password));
+
       std::vector<unsigned char> buffer;
 
       // Enter login
@@ -566,15 +731,27 @@ namespace rtnt {
 
       // Search for "Login incorrect"
       buffer.clear();
-      unsigned int checkStatus = expectOutput("Login incorrect", buffer);
-      if (checkStatus == RTELNET_SUCCESS) return RTELNET_ERROR_FAILED_LOGIN;
+      unsigned int bufferPeek = _tcp.Read(buffer);
+      if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
+
+      std::string cleanedBuffer(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+
+      cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\r'), cleanedBuffer.end());
+      cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\n'), cleanedBuffer.end());
+
+      if (cleanedBuffer.find("Login incorrect") != std::string::npos) {
+        return RTELNET_ERROR_FAILED_LOGIN;
+      }
 
       _logged_in = true;
+
+      _logger.log(RTELNET_LOG_LOGIN, "Logged in successfully.", 2, LV(_username), LV(_password));
 
       return RTELNET_SUCCESS;
     }
 
     friend class tcp;
+    friend class Logger;
   };
 
 }
