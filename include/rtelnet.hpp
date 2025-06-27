@@ -39,6 +39,8 @@ inline constexpr int RTELNET_IP_VERSION                     = 4;
 inline constexpr int RTELNET_IDLE_TIMEOUT                   = 1000;
 inline constexpr int RTELNET_TOTAL_TIMEOUT                  = 10000;
 inline constexpr int RTELNET_DEBUG                          = 0;
+inline constexpr int RTELNET_LOGIN_TIMEOUT                  = 3000; // ms
+inline constexpr int RTELNET_NEGOTIATION_TIMEOUT            = 3; // s
 
 // Log titles
 inline constexpr const char* RTELNET_LOG_TCP_SET_ADDR = "TCP => SETTING SOCKET ADDRESS";
@@ -435,22 +437,37 @@ namespace rtnt {
     inline bool isNegotiated() const { return _negotiated; }
     inline bool isLoggedIn() const { return _logged_in; }
     inline int getBackgroundError() const { return _backgroundError; }
+    inline bool isBackgroundError() const { return _stopBackground; }
 
     tcp _tcp;
     Logger _logger;
 
-    inline unsigned int Read(std::vector<unsigned char>& buffer, size_t n = RTELNET_BUFFER_SIZE, unsigned int flag = 0) {
-      std::lock_guard<std::mutex> lock(_bufferMutex);
+    inline unsigned int Read(std::vector<unsigned char>& buffer, size_t n = RTELNET_BUFFER_SIZE, unsigned int flag = 0, unsigned int timeoutMs = 1000) {
+      auto start = std::chrono::steady_clock::now();
 
-      size_t toRead = std::min(n, _sharedBuffer.size());
-      buffer.insert(buffer.end(), _sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
-      if (flag != MSG_PEEK) {
-          _sharedBuffer.erase(_sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
-      }
+      while (true) {
+        {
+          std::lock_guard<std::mutex> lock(_bufferMutex);
 
-      _logger.log(RTELNET_LOG_TCP_READ, "Successfully read.", 4, LV(buffer), LV(n), LV(flag));
+          size_t toRead = std::min(n, _sharedBuffer.size());
 
-      return RTELNET_SUCCESS;
+          if (toRead > 0) {
+            buffer.insert(buffer.end(), _sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
+            if (flag != MSG_PEEK) {
+                _sharedBuffer.erase(_sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
+            }
+            return RTELNET_SUCCESS;
+          }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+          buffer.clear();
+          return RTELNET_SUCCESS;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // avoid CPU spinning
+    }
     }
 
     inline unsigned int Connect() {
@@ -468,14 +485,24 @@ namespace rtnt {
       
       _background = std::thread([this]() {
         while (!_stopBackground) {
-          std::vector<unsigned char> buffer;
-          unsigned int status = _tcp.Read(buffer);
+          int readFlag = 0;
+          if (!_negotiated) readFlag = MSG_PEEK;
 
-          if (status != RTELNET_SUCCESS || buffer.empty()) continue;
+          std::vector<unsigned char> buffer;
+          unsigned int status = _tcp.Read(buffer, RTELNET_BUFFER_SIZE, readFlag);
+
+          if (status != RTELNET_SUCCESS) {
+            _stopBackground = true; _backgroundError = status; break;
+          }
 
           if (buffer[0] == IAC) {
             int negotiateStatus = Negotiate();
-            if (negotiateStatus != RTELNET_SUCCESS) _stopBackground = true; _backgroundError = RTELNET_ERROR_IAC_READER_FAILED_NEGO; break;
+            if (negotiateStatus != RTELNET_SUCCESS) {
+              _stopBackground = true;
+              _backgroundError = negotiateStatus;
+              break;
+            }
+            continue;
           } else {
             std::lock_guard<std::mutex> lock(_bufferMutex);
             _sharedBuffer.insert(_sharedBuffer.end(), buffer.begin(), buffer.end());
@@ -485,15 +512,14 @@ namespace rtnt {
         }
       });
 
+
       auto start = std::chrono::steady_clock::now();
       while (!_negotiated) {
-        if ((std::chrono::steady_clock::now() - start) > std::chrono::seconds(2)) {
+        if ((std::chrono::steady_clock::now() - start) > std::chrono::seconds(RTELNET_NEGOTIATION_TIMEOUT)) {
           return RTELNET_ERROR_NEGOTIATION_TIMEOUT;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
-
-      if (!waitForBufferFill()) return RTELNET_ERROR_SHARED_BUFFER_EMPTY;
 
       int loginStatus = Login();
       if (loginStatus != RTELNET_SUCCESS) return loginStatus;
@@ -567,17 +593,6 @@ namespace rtnt {
     std::vector<unsigned char> _sharedBuffer;
     unsigned int _backgroundError;
 
-    inline bool waitForBufferFill(int maxWaitMs = 1000) {
-      for (int i = 0; i < maxWaitMs / 50; ++i) {
-        {
-          std::lock_guard<std::mutex> lock(_bufferMutex);
-          if (!_sharedBuffer.empty()) return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        _logger.log("WAITING HERE", "Waiting for shared buffer to fill.", 2, LV(maxWaitMs), LV(_sharedBuffer));
-      }
-      return false;
-    }
     /*        ---           IAC Listener         ---         */
 
     /*        ---         Telnet commands        ---         */
@@ -598,10 +613,11 @@ namespace rtnt {
         unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
-        printTelnet(buffer, 1);
+        // printTelnet(buffer, 1);
 
         ssize_t n = static_cast<ssize_t>(buffer.size());
         if (n < 3) {
+          _negotiated = false;
           return RTELNET_ERROR_SHARED_BUFFER_EMPTY;
         }
 
@@ -747,11 +763,10 @@ namespace rtnt {
         
         _tcp.SendBin(response);
         _negotiated = true;
-        printTelnet(response, 0);
+        // printTelnet(response, 0);
       }
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Finished negotiation sequence.", 2);
-
       return RTELNET_SUCCESS;
     }
 
@@ -807,29 +822,42 @@ namespace rtnt {
 
       // Search for "Login incorrect"
       std::string accumulated;
+      buffer.clear();
       auto start = std::chrono::steady_clock::now();
 
+      _logger.log(RTELNET_LOG_LOGIN, "Searching for Login incorrect.", 2);
+
       while (true) {
-        std::vector<unsigned char> chunk;
-        unsigned int status = Read(chunk);
-        if (status != RTELNET_SUCCESS) return status;
 
-        accumulated.append(chunk.begin(), chunk.end());
+          unsigned int readStatus = Read(buffer, RTELNET_BUFFER_SIZE, MSG_PEEK);
+          if (readStatus != RTELNET_SUCCESS) return readStatus;
 
-        // Normalize
-        accumulated.erase(std::remove(accumulated.begin(), accumulated.end(), '\r'), accumulated.end());
-        accumulated.erase(std::remove(accumulated.begin(), accumulated.end(), '\n'), accumulated.end());
+          if (!buffer.empty()) {
+              std::string temp(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+              temp.erase(std::remove(temp.begin(), temp.end(), '\r'), temp.end());
+              temp.erase(std::remove(temp.begin(), temp.end(), '\n'), temp.end());
 
-        if (accumulated.find("Login incorrect") != std::string::npos) {
-          return RTELNET_ERROR_FAILED_LOGIN;
-        }
+              accumulated += temp;
+          }
 
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 1500) {
-          break;
-        }
+          _logger.log(RTELNET_LOG_LOGIN, "Still searching.", 2, LV(accumulated));
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+          if (accumulated.find("Login incorrect") != std::string::npos) {
+              return RTELNET_ERROR_FAILED_LOGIN;
+          }
+
+          // possible: detect prompt here, e.g., "$ " or "> "
+          if (accumulated.find("$") != std::string::npos || accumulated.find(">") != std::string::npos || accumulated.find("#") != std::string::npos) {
+              break;
+          }
+
+          auto now = std::chrono::steady_clock::now();
+          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > RTELNET_LOGIN_TIMEOUT) {
+              break;
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
 
       _logged_in = true;
