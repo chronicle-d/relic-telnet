@@ -1,59 +1,67 @@
 /*
- * Relic Telnet is a header only library.
- * This file is only to test the functionality of rtelnet.
- */
+ * Minimal Telnet Client using Relic Telnet
+*/
 
 #include "rtelnet.hpp"
-
-#include <exception>
 #include <iostream>
+#include <string>
+#include <thread>
+#include <atomic>
 
-int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    std::cerr << "[ERROR]: Usage: " << argv[0] << " ADDRESS PORT \n";
+int main(int argc, char* argv[]) {
+  if (argc < 3) {
+    std::cerr << "Usage: " << argv[0] << " <address> <port>\n";
     return 1;
   }
- 
-  rtnt::session Session;
-  int fd;
 
-  Session._address = argv[1];
-  Session._port = std::atoi(argv[2]);
+  std::string address = argv[1];
+  int port = std::atoi(argv[2]);
 
-  try {
-    fd = rtnt::Connect(Session);
-    if (fd != 0) {
-      std::cerr << "[ERROR]: " << rtnt::readError(fd) << "\n";
-      return 1;
-    }
-  } catch (std::exception &e) {
-    std::cerr << "[ERROR]: " << e.what() << "\n";
+  std::string username, password;
+  std::cout << "Username: ";
+  std::getline(std::cin, username);
+  std::cout << "Password: ";
+  std::getline(std::cin, password);
+
+  rtnt::session session(address.c_str(), username, password, port, 4, 2);
+
+  unsigned int connectionStatus = session.Connect();
+
+  if (connectionStatus != RTELNET_SUCCESS) {
+    std::cerr << "Failed to connect. (" + rtnt::readError(connectionStatus) + ")\n";
   }
 
+  std::cout << "[Connected] — type 'exit' to quit.\n";
 
-  // while (true) {
-  //   try {
-  //
-  //     std::cout << "> ";
-  //     std::string message;
-  //     getline(std::cin, message);
-  //
-  //     if (message == "quit") { break; }
-  //
-  //     int status = Session._tcp.Send(message + "\n", fd);
-  //     if (status != 0) {
-  //         std::cerr << "[ERROR]: " << rtnt::readError(status) << "\n";
-  //         return 1;
-  //     }
-  //
-  //     std::string buffer = rtnt::unwrapOrThrow(Session._tcp.Read(fd));
-  //     std::cout << "< " << buffer;
-  //
-  //   } catch (std::exception &e) {
-  //     std::cerr << "[ERROR]: " << e.what() << "\n";
-  //   }
-  // }
-  //
-  Session._tcp.Close(fd);
+  std::atomic<bool> done{false};
+
+  // Thread to read server output
+  std::thread reader([&]() {
+    std::vector<unsigned char> buffer;
+    while (!done) {
+      unsigned int status = session.Read(buffer, 1024, 0);
+      if (status == RTELNET_SUCCESS && !buffer.empty()) {
+        std::string output(buffer.begin(), buffer.end());
+        std::cout << output << std::flush;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  });
+
+  // Main loop to read user input
+  std::string input;
+  while (true) {
+    std::getline(std::cin, input);
+    if (input == "exit") break;
+
+    unsigned int status = session.Execute(input, input); // re-use same string as output buffer
+    if (status != RTELNET_SUCCESS) {
+      std::cerr << "Command failed: " << rtnt::readError(status) << "\n";
+    }
+  }
+
+  done = true;
+  if (reader.joinable()) reader.join();
+
   return 0;
 }
