@@ -150,7 +150,7 @@ inline void printTelnet(const std::vector<unsigned char>& buffer, int who) {
     }
   };
 
-  std::cout << "[TELNET " << ((who == 0) ? "->" : "<-") << " ] " << cmdName(buffer[1])
+  std::cerr << "[TELNET " << ((who == 0) ? "->" : "<-") << " ] " << cmdName(buffer[1])
             << " " << optName(buffer[2])
             << " (IAC " << (int)buffer[1] << " " << (int)buffer[2] << ")\n";
 }

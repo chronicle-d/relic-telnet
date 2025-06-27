@@ -11,6 +11,7 @@
 #define RTELNET_H
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -24,11 +25,14 @@
 #include <thread>
 #include <sys/select.h>
 #include <map>
+#include <atomic>
+#include <mutex>
 
 #include "debug_helpers.hpp"
 
 #define LV(x) #x, x
 
+// DEFUALTS
 inline constexpr int RTELNET_PORT                           = 23;
 inline constexpr int RTELNET_BUFFER_SIZE                    = 1024;
 inline constexpr int RTELNET_IP_VERSION                     = 4;
@@ -47,17 +51,7 @@ inline constexpr const char* RTELNET_LOG_CONNECT = "CONNECT";
 inline constexpr const char* RTELNET_LOG_EXECUTE = "EXECITE";
 inline constexpr const char* RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
 inline constexpr const char* RTELNET_LOG_LOGIN = "LOGIN";
-
-
-
-
-
-
-
-
-
-
-
+inline constexpr const char* RTELNET_LOG_IAC_READER = "IAC READER";
 
 
 // 0 | 200 > 210 : Relic telnet
@@ -81,6 +75,9 @@ inline constexpr int RTELNET_ERROR_USERNAME_NOT_SET         = 302;
 inline constexpr int RTELNET_ERROR_PASSWORD_NOT_SET         = 303;
 inline constexpr int RTELNET_ERROR_NOT_LOGGED               = 304;
 inline constexpr int RTELNET_ERROR_FAILED_LOGIN             = 305;
+inline constexpr int RTELNET_ERROR_IAC_READER_FAILED_NEGO   = 306;
+inline constexpr int RTELNET_ERROR_SHARED_BUFFER_EMPTY      = 307;
+inline constexpr int RTELNET_ERROR_NEGOTIATION_TIMEOUT      = 308;
 
 
 namespace rtnt {
@@ -173,6 +170,9 @@ namespace rtnt {
       case RTELNET_ERROR_CANT_FIND_EXPECTED: return           "cannot find expected substring in buffer.";
       case RTELNET_ERROR_USERNAME_NOT_SET: return             "username was not set in object.";
       case RTELNET_ERROR_PASSWORD_NOT_SET: return             "password was not set in object.";
+      case RTELNET_ERROR_IAC_READER_FAILED_NEGO: return       "IAC reader failed while re negotiating.";
+      case RTELNET_ERROR_SHARED_BUFFER_EMPTY: return          "Read failed, the shared buffer is empty.";
+      case RTELNET_ERROR_NEGOTIATION_TIMEOUT: return          "Timeout while waiting for negotiation.";
 
       default: return                                         "Unknonw error.";
     }
@@ -211,7 +211,13 @@ namespace rtnt {
       _logger(this) {}
 
     ~session() {
-      close(_fd);
+      _stopBackground = true;
+
+      if (_background.joinable()) {
+        _background.join();
+      }
+
+      _tcp.Close();
     }
 
     class Logger {
@@ -223,22 +229,22 @@ namespace rtnt {
               const std::string& name1, const T& val1, const Rest&... rest) {
         if (_owner->_debug < level) return;
 
-        std::cout << "\033[1;97m[\033[0m\033[1;96m"
+        std::cerr << "\033[1;97m[\033[0m\033[1;96m"
                   << title
                   << "\033[0m\033[1;97m]:\033[0m "
                   << message
                   << " (";
         
-        print_named_args(true, name1, val1, rest...);
+        printNamedArgs(true, name1, val1, rest...);
 
-        std::cout << ")" << std::endl;
+        std::cerr << ")" << std::endl;
       }
 
       // --- Simple version for just message
       inline void log(const std::string& title, const std::string& message, int level) {
         if (_owner->_debug < level) return;
 
-        std::cout << "\033[1;97m[\033[0m\033[1;96m"
+        std::cerr << "\033[1;97m[\033[0m\033[1;96m"
                   << title
                   << "\033[0m\033[1;97m]:\033[0m "
                   << message
@@ -249,67 +255,67 @@ namespace rtnt {
       session* _owner;
 
       template <typename T>
-      void print_named_arg(const std::string& name, const T& value, bool isFirst) {
-        if (!isFirst) std::cout << ", ";
-        std::cout << name << ": " << value;
+      void printNamedArg(const std::string& name, const T& value, bool isFirst) {
+        if (!isFirst) std::cerr << ", ";
+        std::cerr << name << ": " << value;
       }
 
       template <typename T>
-      void print_named_arg(const std::string& name, const std::vector<T>& value, bool isFirst) {
-        if (!isFirst) std::cout << ", ";
-        std::cout << name << ": <";
+      void printNamedArg(const std::string& name, const std::vector<T>& value, bool isFirst) {
+        if (!isFirst) std::cerr << ", ";
+        std::cerr << name << ": <";
         for (size_t i = 0; i < value.size(); ++i) {
-          std::cout << value[i];
-          if (i + 1 < value.size()) std::cout << ", ";
+          std::cerr << value[i];
+          if (i + 1 < value.size()) std::cerr << ", ";
         }
-        std::cout << ">";
+        std::cerr << ">";
       }
 
-      inline void print_named_arg(const std::string& name, const std::vector<unsigned char>& value, bool isFirst) {
-        if (!isFirst) std::cout << ", ";
-        std::cout << name << ": <";
+      inline void printNamedArg(const std::string& name, const std::vector<unsigned char>& value, bool isFirst) {
+        if (!isFirst) std::cerr << ", ";
+        std::cerr << name << ": <";
         for (size_t i = 0; i < value.size(); ++i) {
-          std::cout << static_cast<int>(value[i]);
-          if (i + 1 < value.size()) std::cout << ", ";
+          std::cerr << static_cast<int>(value[i]);
+          if (i + 1 < value.size()) std::cerr << ", ";
         }
-        std::cout << ">";
+        std::cerr << ">";
       }
 
-      inline void print_named_arg(const std::string& name, const std::string& value, bool isFirst) {
-        if (!isFirst) std::cout << ", ";
-        std::cout << name << ": \"";
+      inline void printNamedArg(const std::string& name, const std::string& value, bool isFirst) {
+        if (!isFirst) std::cerr << ", ";
+        std::cerr << name << ": \"";
         for (char c : value) {
           switch (c) {
-            case '\\': std::cout << "\\\\"; break;
-            case '\n': std::cout << "\\n"; break;
-            case '\t': std::cout << "\\t"; break;
-            case '\r': std::cout << "\\r"; break;
-            default: std::cout << c; break;
+            case '\\': std::cerr << "\\\\"; break;
+            case '\n': std::cerr << "\\n"; break;
+            case '\t': std::cerr << "\\t"; break;
+            case '\r': std::cerr << "\\r"; break;
+            default: std::cerr << c; break;
           }
         }
-        std::cout << "\"";
+        std::cerr << "\"";
       }
 
 
 
       template <typename K, typename V>
-      void print_named_arg(const std::string& name, const std::map<K, V>& value, bool isFirst) {
-        if (!isFirst) std::cout << ", ";
-        std::cout << name << ": <";
+      void printNamedArg(const std::string& name, const std::map<K, V>& value, bool isFirst) {
+        if (!isFirst) std::cerr << ", ";
+        std::cerr << name << ": <";
         size_t count = 0;
         for (const auto& [k, v] : value) {
-          std::cout << k << ": " << v;
-          if (++count < value.size()) std::cout << ", ";
+          std::cerr << k << ": " << v;
+          if (++count < value.size()) std::cerr << ", ";
         }
-        std::cout << ">";
+        std::cerr << ">";
       }
 
-      inline void print_named_args(bool) {}
+      inline void printNamedArgs(bool) {}
 
       template <typename T, typename... Rest>
-      void print_named_args(bool isFirst, const std::string& name, const T& value, const Rest&... rest) {
-        print_named_arg(name, value, isFirst);
-        print_named_args(false, rest...);
+      void printNamedArgs(bool isFirst, const std::string& name, const T& value, const Rest&... rest) {
+        printNamedArg(name, value, isFirst);
+        printNamedArgs(false, rest...);
       }
     };
 
@@ -371,10 +377,10 @@ namespace rtnt {
         std::vector<unsigned char> buffer;
         buffer.reserve(message.size());
 
-        // Escape 255/0xFF
+        // Escape 255/0xFF unless full duplex binary communication.
         for (unsigned char c : message) {
           buffer.push_back(c);
-          if (c == 255) buffer.push_back(255);
+          if (!(_owner->_binarySendEnabled && _owner->_binaryReceiveEnabled) && c == 255) buffer.push_back(255);
         }
 
         errno = 0;
@@ -416,9 +422,7 @@ namespace rtnt {
         if (bytesRead == 0) return RTELNET_TCP_ERROR_CONNECTION_CLOSED_R;
 
         buffer.resize(bytesRead);
-
-        _owner->_logger.log(RTELNET_LOG_TCP_READ, "Successfully read.", 4, LV(buffer), LV(readSize), LV(recvFlag));
-
+ 
         return RTELNET_SUCCESS;
       }
 
@@ -430,9 +434,24 @@ namespace rtnt {
     inline bool isConnected() const { return _connected; }
     inline bool isNegotiated() const { return _negotiated; }
     inline bool isLoggedIn() const { return _logged_in; }
+    inline int getBackgroundError() const { return _backgroundError; }
 
     tcp _tcp;
     Logger _logger;
+
+    inline unsigned int Read(std::vector<unsigned char>& buffer, size_t n = RTELNET_BUFFER_SIZE, unsigned int flag = 0) {
+      std::lock_guard<std::mutex> lock(_bufferMutex);
+
+      size_t toRead = std::min(n, _sharedBuffer.size());
+      buffer.insert(buffer.end(), _sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
+      if (flag != MSG_PEEK) {
+          _sharedBuffer.erase(_sharedBuffer.begin(), _sharedBuffer.begin() + toRead);
+      }
+
+      _logger.log(RTELNET_LOG_TCP_READ, "Successfully read.", 4, LV(buffer), LV(n), LV(flag));
+
+      return RTELNET_SUCCESS;
+    }
 
     inline unsigned int Connect() {
 
@@ -447,14 +466,40 @@ namespace rtnt {
       if (fd < 0) { return fd; }
       _fd = fd;
       
-      int negotiateStatus = Negotiate();
-      if (negotiateStatus != RTELNET_SUCCESS) return negotiateStatus;
+      _background = std::thread([this]() {
+        while (!_stopBackground) {
+          std::vector<unsigned char> buffer;
+          unsigned int status = _tcp.Read(buffer);
+
+          if (status != RTELNET_SUCCESS || buffer.empty()) continue;
+
+          if (buffer[0] == IAC) {
+            int negotiateStatus = Negotiate();
+            if (negotiateStatus != RTELNET_SUCCESS) _stopBackground = true; _backgroundError = RTELNET_ERROR_IAC_READER_FAILED_NEGO; break;
+          } else {
+            std::lock_guard<std::mutex> lock(_bufferMutex);
+            _sharedBuffer.insert(_sharedBuffer.end(), buffer.begin(), buffer.end());
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      });
+
+      auto start = std::chrono::steady_clock::now();
+      while (!_negotiated) {
+        if ((std::chrono::steady_clock::now() - start) > std::chrono::seconds(2)) {
+          return RTELNET_ERROR_NEGOTIATION_TIMEOUT;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+
+      if (!waitForBufferFill()) return RTELNET_ERROR_SHARED_BUFFER_EMPTY;
 
       int loginStatus = Login();
       if (loginStatus != RTELNET_SUCCESS) return loginStatus;
 
       _logger.log(RTELNET_LOG_CONNECT, "Connected to telnet server.", 2, _address, _port);
-
+ 
       return RTELNET_SUCCESS;
     }
 
@@ -475,7 +520,7 @@ namespace rtnt {
       auto lastRead = startTime;
 
       while (true) {
-        unsigned int readStatus = _tcp.Read(output);
+        unsigned int readStatus = Read(output);
         if (readStatus != RTELNET_SUCCESS) return readStatus;
 
         if (!output.empty()) {
@@ -515,23 +560,50 @@ namespace rtnt {
     bool _logged_in = false;
     int _fd;
 
+    /*        ---           IAC Listener         ---         */
+    std::thread _background;
+    std::atomic<bool> _stopBackground{false};
+    std::mutex _bufferMutex;
+    std::vector<unsigned char> _sharedBuffer;
+    unsigned int _backgroundError;
+
+    inline bool waitForBufferFill(int maxWaitMs = 1000) {
+      for (int i = 0; i < maxWaitMs / 50; ++i) {
+        {
+          std::lock_guard<std::mutex> lock(_bufferMutex);
+          if (!_sharedBuffer.empty()) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        _logger.log("WAITING HERE", "Waiting for shared buffer to fill.", 2, LV(maxWaitMs), LV(_sharedBuffer));
+      }
+      return false;
+    }
+    /*        ---           IAC Listener         ---         */
+
+    /*        ---         Telnet commands        ---         */
+    bool _binarySendEnabled = false;
+    bool _binaryReceiveEnabled = false; 
+    /*        ---         Telnet commands        ---         */
+
     unsigned int Negotiate() {
       if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Trying to negotiate.", 2);
-
+    
       std::vector<unsigned char> buffer;
 
       while (true) {
-
         // Peek in the buffer
+        buffer.clear();
         unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
-        // printTelnet(buffer, 1);
+        printTelnet(buffer, 1);
 
         ssize_t n = static_cast<ssize_t>(buffer.size());
-        if (n < 3) return errno;
+        if (n < 3) {
+          return RTELNET_ERROR_SHARED_BUFFER_EMPTY;
+        }
 
         // If not a negotiation packet, exit
         if (buffer[0] != IAC) {
@@ -543,8 +615,9 @@ namespace rtnt {
         }
 
         // Read the full 3-byte sequence
+        buffer.clear();
         unsigned int bufferResult = _tcp.Read(buffer, 3);
-        if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
+        if (bufferPeek != RTELNET_SUCCESS) { return bufferResult; }
 
         unsigned char command = buffer[1];
         unsigned char option  = buffer[2];
@@ -557,7 +630,7 @@ namespace rtnt {
         switch (command) {
           case DO:
             switch (option) {
-              case BINARY:               response[1] = WONT; break;
+              case BINARY:               response[1] = WILL; _binarySendEnabled = true; break;
               case ECHO:                 response[1] = WONT; break;
               case SGA:                  response[1] = WONT; break;
               case STATUS:               response[1] = WONT; break;
@@ -612,7 +685,7 @@ namespace rtnt {
 
           case WILL:
             switch (option) {
-              case BINARY:               response[1] = DONT; break;
+              case BINARY:               response[1] = DO; _binaryReceiveEnabled = true; break;
               case ECHO:                 response[1] = DONT; break;
               case SGA:                  response[1] = DONT; break;
               case STATUS:               response[1] = DONT; break;
@@ -671,9 +744,10 @@ namespace rtnt {
             break;
         }
 
+        
         _tcp.SendBin(response);
         _negotiated = true;
-        // printTelnet(response, 0);
+        printTelnet(response, 0);
       }
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Finished negotiation sequence.", 2);
@@ -687,8 +761,10 @@ namespace rtnt {
         if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
 
         for (int i = 0; i < 300; ++i) {
-          unsigned int readStatus = _tcp.Read(buffer);
+          unsigned int readStatus = Read(buffer);
           if (readStatus != RTELNET_SUCCESS) return readStatus;
+
+          _logger.log("EXPECT", "Expecting.", 2, LV(expect) , LV(buffer));
 
           std::string cleanedBuffer(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
@@ -730,17 +806,30 @@ namespace rtnt {
       if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
 
       // Search for "Login incorrect"
-      buffer.clear();
-      unsigned int bufferPeek = _tcp.Read(buffer);
-      if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
+      std::string accumulated;
+      auto start = std::chrono::steady_clock::now();
 
-      std::string cleanedBuffer(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+      while (true) {
+        std::vector<unsigned char> chunk;
+        unsigned int status = Read(chunk);
+        if (status != RTELNET_SUCCESS) return status;
 
-      cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\r'), cleanedBuffer.end());
-      cleanedBuffer.erase(std::remove(cleanedBuffer.begin(), cleanedBuffer.end(), '\n'), cleanedBuffer.end());
+        accumulated.append(chunk.begin(), chunk.end());
 
-      if (cleanedBuffer.find("Login incorrect") != std::string::npos) {
-        return RTELNET_ERROR_FAILED_LOGIN;
+        // Normalize
+        accumulated.erase(std::remove(accumulated.begin(), accumulated.end(), '\r'), accumulated.end());
+        accumulated.erase(std::remove(accumulated.begin(), accumulated.end(), '\n'), accumulated.end());
+
+        if (accumulated.find("Login incorrect") != std::string::npos) {
+          return RTELNET_ERROR_FAILED_LOGIN;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > 1500) {
+          break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
 
       _logged_in = true;
