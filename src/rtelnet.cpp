@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
   std::cout << "Password: ";
   std::getline(std::cin, password);
 
-  rtnt::session session(address.c_str(), username, password, port, 4, 0);
+  rtnt::session session(address.c_str(), username, password, port, 4, 4);
   unsigned int connectionStatus = session.Connect();
 
   if (session.isBackgroundError() || connectionStatus != RTELNET_SUCCESS) {
