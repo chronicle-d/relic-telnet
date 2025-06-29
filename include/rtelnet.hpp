@@ -10,9 +10,11 @@
 #ifndef RTELNET_H
 #define RTELNET_H
 
+#include <iostream>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -28,155 +30,155 @@
 #include <atomic>
 #include <mutex>
 
-#include "debug_helpers.hpp"
-
 #define LV(x) #x, x
 
 // DEFUALTS
-inline constexpr int RTELNET_PORT                           = 23;
-inline constexpr int RTELNET_BUFFER_SIZE                    = 1024;
-inline constexpr int RTELNET_IP_VERSION                     = 4;
-inline constexpr int RTELNET_IDLE_TIMEOUT                   = 1000;
-inline constexpr int RTELNET_TOTAL_TIMEOUT                  = 10000;
-inline constexpr int RTELNET_DEBUG                          = 0;
-inline constexpr int RTELNET_LOGIN_TIMEOUT                  = 3000; // ms
-inline constexpr int RTELNET_NEGOTIATION_TIMEOUT            = 3; // s
+inline constexpr int RTELNET_SUCCESS             = 0;
+inline constexpr int RTELNET_PORT                = 23;
+inline constexpr int RTELNET_BUFFER_SIZE         = 1024;
+inline constexpr int RTELNET_IP_VERSION          = 4;
+inline constexpr int RTELNET_IDLE_TIMEOUT        = 1000;
+inline constexpr int RTELNET_TOTAL_TIMEOUT       = 10000;
+inline constexpr int RTELNET_DEBUG               = 0;
+inline constexpr int RTELNET_LOGIN_TIMEOUT       = 3000; // ms
+inline constexpr int RTELNET_NEGOTIATION_TIMEOUT = 3; // s
 
 // Log titles
-inline constexpr const char* RTELNET_LOG_TCP_SET_ADDR = "TCP => SETTING SOCKET ADDRESS";
-inline constexpr const char* RTELNET_LOG_TCP_CONNECT = "TCP => CONNECTING TO SOCKET";
-inline constexpr const char* RTELNET_LOG_TCP_CLOSE = "TCP => CLOSING SOCKET";
-inline constexpr const char* RTELNET_LOG_TCP_SEND_BIN = "TCP => SEND BIN";
-inline constexpr const char* RTELNET_LOG_TCP_SEND = "TCP => SEND";
-inline constexpr const char* RTELNET_LOG_TCP_READ = "TCP => READ";
-inline constexpr const char* RTELNET_LOG_CONNECT = "CONNECT";
-inline constexpr const char* RTELNET_LOG_EXECUTE = "EXECITE";
-inline constexpr const char* RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
-inline constexpr const char* RTELNET_LOG_LOGIN = "LOGIN";
-inline constexpr const char* RTELNET_LOG_IAC_READER = "IAC READER";
-
-
-// 0 | 200 > 210 : Relic telnet
-inline constexpr int RTELNET_SUCCESS                        = 0;
-inline constexpr int RTELNET_ERROR_CANT_FIND_EXPECTED       = 201;
-
-// From 1 to 199 - errno errors
-
-// 210 > : TCP connection errors.
-inline constexpr int RTELNET_TCP_ERROR_ADDRESS_NOT_VALID    = 210;
-inline constexpr int RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD    = 211;
-inline constexpr int RTELNET_TCP_ERROR_CONNECTION_CLOSED_R  = 212;
-inline constexpr int RTELNET_TCP_ERROR_NOT_CONNECTED        = 213;
-inline constexpr int RTELNET_TCP_ERROR_FAILED_SEND          = 214;
-inline constexpr int RTELNET_TCP_ERROR_PARTIAL_SEND         = 215;
-
-// 300 > : Telnet logic errors.
-inline constexpr int RTELNET_ERROR_NOT_A_NEGOTIATION        = 300;
-inline constexpr int RTELNET_ERROR_NOT_NEGOTIATED           = 301;
-inline constexpr int RTELNET_ERROR_USERNAME_NOT_SET         = 302;
-inline constexpr int RTELNET_ERROR_PASSWORD_NOT_SET         = 303;
-inline constexpr int RTELNET_ERROR_NOT_LOGGED               = 304;
-inline constexpr int RTELNET_ERROR_FAILED_LOGIN             = 305;
-inline constexpr int RTELNET_ERROR_IAC_READER_FAILED_NEGO   = 306;
-inline constexpr int RTELNET_ERROR_SHARED_BUFFER_EMPTY      = 307;
-inline constexpr int RTELNET_ERROR_NEGOTIATION_TIMEOUT      = 308;
-
+inline constexpr std::string_view RTELNET_LOG_TCP_SET_ADDR = "TCP => SETTING SOCKET ADDRESS";
+inline constexpr std::string_view RTELNET_LOG_TCP_CONNECT = "TCP => CONNECTING TO SOCKET";
+inline constexpr std::string_view RTELNET_LOG_TCP_CLOSE = "TCP => CLOSING SOCKET";
+inline constexpr std::string_view RTELNET_LOG_TCP_SEND_BIN = "TCP => SEND BIN";
+inline constexpr std::string_view RTELNET_LOG_TCP_SEND = "TCP => SEND";
+inline constexpr std::string_view RTELNET_LOG_TCP_READ = "TCP => READ";
+inline constexpr std::string_view RTELNET_LOG_CONNECT = "CONNECT";
+inline constexpr std::string_view RTELNET_LOG_EXECUTE = "EXECITE";
+inline constexpr std::string_view RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
+inline constexpr std::string_view RTELNET_LOG_LOGIN = "LOGIN";
+inline constexpr std::string_view RTELNET_LOG_IAC_READER = "IAC READER";
+inline constexpr std::string_view RTELNET_LOG_PTELNET = "TELNET";
 
 namespace rtnt {
 
-  inline constexpr unsigned char IAC                    = 255; // Interpret As Command
-  inline constexpr unsigned char DO                     = 253; // Please use this option
-  inline constexpr unsigned char DONT                   = 254; // Please don’t use this option
-  inline constexpr unsigned char WILL                   = 251; // I will use this option
-  inline constexpr unsigned char WONT                   = 252; // I won’t use this option
-  inline constexpr unsigned char SB                     = 250; // Begin subnegotiation
-  inline constexpr unsigned char SE                     = 240; // End subnegotiation
-  inline constexpr unsigned char BINARY                 = 0;   // Binary transmission (8-bit clean communication)
-  inline constexpr unsigned char ECHO                   = 1;   // Echo input back to sender (commonly server-side)
-  inline constexpr unsigned char SGA                    = 3;   // Suppress Go Ahead (stream mode instead of line mode)
-  inline constexpr unsigned char STATUS                 = 5;   // Query or send current option status
-  inline constexpr unsigned char TIMING_MARK            = 6;   // Timing mark for synchronization
-  inline constexpr unsigned char TERMINAL_TYPE          = 24;  // Exchange terminal type (e.g., "ANSI", "VT100")
-  inline constexpr unsigned char NAWS                   = 31;  // Negotiate About Window Size (send terminal size)
-  inline constexpr unsigned char LINEMODE               = 34;  // Line-by-line input mode negotiation
-  inline constexpr unsigned char NEW_ENVIRON            = 39;  // Send environment variables (supersedes option 36)
-  inline constexpr unsigned char X_DISPLAY_LOCATION     = 35;  // Send X11 DISPLAY value (e.g., ":0")
-  inline constexpr unsigned char LOGOUT                 = 18;  // Server requests client logout
-  inline constexpr unsigned char ENVIRONMENT_OPTION     = 36;  // Deprecated method to send environment variables
-  inline constexpr unsigned char AUTHENTICATION         = 37;  // Authenticate user via a scheme (e.g., Kerberos)
-  inline constexpr unsigned char ENCRYPTION             = 38;  // Encrypt the Telnet stream
-  inline constexpr unsigned char RCP                    = 2;   // Remote Controlled Port (obsolete)
-  inline constexpr unsigned char NAMS                   = 4;   // Negotiate Approximate Message Size (rare)
-  inline constexpr unsigned char RCTE                   = 7;   // Remote Controlled Transmission and Echo
-  inline constexpr unsigned char NAOL                   = 8;   // Output line width setting
-  inline constexpr unsigned char NAOP                   = 9;   // Output page size
-  inline constexpr unsigned char NAOCRD                 = 10;  // Carriage return disposition
-  inline constexpr unsigned char NAOHTS                 = 11;  // Horizontal tab stops
-  inline constexpr unsigned char NAOHTD                 = 12;  // Horizontal tab disposition
-  inline constexpr unsigned char NAOFFD                 = 13;  // Formfeed disposition
-  inline constexpr unsigned char NAOVTS                 = 14;  // Vertical tab stops
-  inline constexpr unsigned char NAOVTD                 = 15;  // Vertical tab disposition
-  inline constexpr unsigned char NAOLFD                 = 16;  // Linefeed disposition
-  inline constexpr unsigned char EXTEND_ASCII           = 17;  // Extended ASCII character set support
-  inline constexpr unsigned char BM                     = 19;  // Byte macro (macros for command sequences)
-  inline constexpr unsigned char DET                    = 20;  // Data Entry Terminal mode
-  inline constexpr unsigned char SUPDUP                 = 21;  // MIT SUPDUP protocol support
-  inline constexpr unsigned char SUPDUP_OUTPUT          = 22;  // SUPDUP output extension
-  inline constexpr unsigned char SEND_LOCATION          = 23;  // Send geographic location
-  inline constexpr unsigned char END_OF_RECORD          = 25;  // Logical end-of-record marker
-  inline constexpr unsigned char TACACS_UID             = 26;  // User identification via TACACS
-  inline constexpr unsigned char OUTPUT_MARKING         = 27;  // Marks screen output boundaries
-  inline constexpr unsigned char TTYLOC                 = 28;  // Send terminal location (TTYLOC)
-  inline constexpr unsigned char REMOTE_FLOW_CONTROL    = 29;  // Enable/disable flow control remotely
-  inline constexpr unsigned char XAUTH                  = 41;  // X Window System authentication
-  inline constexpr unsigned char CHARSET                = 42;  // Negotiate character set
-  inline constexpr unsigned char RSP                    = 43;  // Remote serial port control
-  inline constexpr unsigned char COM_PORT_CONTROL       = 44;  // Advanced serial port control
-  inline constexpr unsigned char SUPPRESS_LOCAL_ECHO    = 45;  // Don't locally echo what we type
-  inline constexpr unsigned char START_TLS              = 46;  // Upgrade connection to TLS (STARTTLS)
-  inline constexpr unsigned char KERMIT                 = 47;  // File transfer via Kermit protocol
-  inline constexpr unsigned char SEND_URL               = 48;  // Send URL string to client
-  inline constexpr unsigned char FORWARD_X              = 49;  // Forward X11 connections
-  inline constexpr unsigned char TERMINAL_SPEED         = 32;  // Set terminal baud rate
-  inline constexpr unsigned char TOGGLE_FLOW_CONTROL    = 33;  // Obsolete; similar to REMOTE_FLOW_CONTROL
-  inline constexpr unsigned char X3_PAD                 = 30;  // Transmit X.3 PAD parameters
-  inline constexpr unsigned char MSDP                   = 69;  // Mud Server Data Protocol (used in MUDs)
-  inline constexpr unsigned char MSSP                   = 70;  // Mud Server Status Protocol
-  inline constexpr unsigned char ZMP                    = 93;  // Zenith Mud Protocol
-  inline constexpr unsigned char MUX                    = 95;  // Legacy multi-session support
-  inline constexpr unsigned char MCCP1                  = 85;  // MUD Client Compression Protocol v1
-  inline constexpr unsigned char MCCP2                  = 86;  // MUD Client Compression Protocol v2
-  inline constexpr unsigned char GMCP                   = 201; // Generic Mud Communication Protocol
-  inline constexpr unsigned char PRAGMA_LOGON           = 138; // Used in Microsoft Telnet (may be in private range)
-  inline constexpr unsigned char SSPI_LOGON             = 139; // SSPI-based login (Microsoft)
-  inline constexpr unsigned char PRAGMA_HEARTBEAT       = 140; // Keep-alive negotiation
+  enum Errors {
+    // 0 | 200 > 210 : Relic telnet
+    CANT_FIND_EXPECTED     = 201,
+  
+    // From 1 to 199 - errno errors
+  
+    // 210 > : TCP connection errors.
+    ADDRESS_NOT_VALID      = 210,
+    CANNOT_ALOCATE_FD      = 211,
+    CONNECTION_CLOSED_R    = 212,
+    NOT_CONNECTED          = 213,
+    FAILED_SEND            = 214,
+    PARTIAL_SEND           = 215,
+  
+    // 300 > : Telnet logic errors.
+    NOT_A_NEGOTIATION      = 300,
+    NOT_NEGOTIATED         = 301,
+    USERNAME_NOT_SET       = 302,
+    PASSWORD_NOT_SET       = 303,
+    NOT_LOGGED             = 304,
+    FAILED_LOGIN           = 305,
+    IAC_READER_FAILED_NEGO = 306,
+    SHARED_BUFFER_EMPTY    = 307,
+    NEGOTIATION_TIMEOUT    = 308
+  };
+
+  enum TelnetCommands : unsigned char {
+    IAC  = 255, // Interpret As Command
+    DO   = 253, // Please use this option
+    DONT = 254, // Please don’t use this option
+    WILL = 251, // I will use this option
+    WONT = 252, // I won’t use this option
+    SB   = 250, // Begin subnegotiation
+    SE   = 240  // End subnegotiation
+  };
+
+  enum TelnetOptions : unsigned char {
+    BINARY              = 0,   // Binary transmission (8-bit clean communication)
+    ECHO                = 1,   // Echo input back to sender (commonly server-side)
+    SGA                 = 3,   // Suppress Go Ahead (stream mode instead of line mode)
+    STATUS              = 5,   // Query or send current option status
+    TIMING_MARK         = 6,   // Timing mark for synchronization
+    TERMINAL_TYPE       = 24,  // Exchange terminal type (e.g., "ANSI", "VT100")
+    NAWS                = 31,  // Negotiate About Window Size (send terminal size)
+    LINEMODE            = 34,  // Line-by-line input mode negotiation
+    NEW_ENVIRON         = 39,  // Send environment variables (supersedes option 36)
+    X_DISPLAY_LOCATION  = 35,  // Send X11 DISPLAY value (e.g., ":0")
+    LOGOUT              = 18,  // Server requests client logout
+    ENVIRONMENT_OPTION  = 36,  // Deprecated method to send environment variables
+    AUTHENTICATION      = 37,  // Authenticate user via a scheme (e.g., Kerberos)
+    ENCRYPTION          = 38,  // Encrypt the Telnet stream
+    RCP                 = 2,   // Remote Controlled Port (obsolete)
+    NAMS                = 4,   // Negotiate Approximate Message Size (rare)
+    RCTE                = 7,   // Remote Controlled Transmission and Echo
+    NAOL                = 8,   // Output line width setting
+    NAOP                = 9,   // Output page size
+    NAOCRD              = 10,  // Carriage return disposition
+    NAOHTS              = 11,  // Horizontal tab stops
+    NAOHTD              = 12,  // Horizontal tab disposition
+    NAOFFD              = 13,  // Formfeed disposition
+    NAOVTS              = 14,  // Vertical tab stops
+    NAOVTD              = 15,  // Vertical tab disposition
+    NAOLFD              = 16,  // Linefeed disposition
+    EXTEND_ASCII        = 17,  // Extended ASCII character set support
+    BM                  = 19,  // Byte macro (macros for command sequences)
+    DET                 = 20,  // Data Entry Terminal mode
+    SUPDUP              = 21,  // MIT SUPDUP protocol support
+    SUPDUP_OUTPUT       = 22,  // SUPDUP output extension
+    SEND_LOCATION       = 23,  // Send geographic location
+    END_OF_RECORD       = 25,  // Logical end-of-record marker
+    TACACS_UID          = 26,  // User identification via TACACS
+    OUTPUT_MARKING      = 27,  // Marks screen output boundaries
+    TTYLOC              = 28,  // Send terminal location (TTYLOC)
+    REMOTE_FLOW_CONTROL = 29,  // Enable/disable flow control remotely
+    XAUTH               = 41,  // X Window System authentication
+    CHARSET             = 42,  // Negotiate character set
+    RSP                 = 43,  // Remote serial port control
+    COM_PORT_CONTROL    = 44,  // Advanced serial port control
+    SUPPRESS_LOCAL_ECHO = 45,  // Don't locally echo what we typeRTELNET_LOG_PTELNET
+    MCCP1               = 85,  // MUD Client Compression Protocol v1
+    MCCP2               = 86,  // MUD Client Compression Protocol v2
+    GMCP                = 201, // Generic Mud Communication Protocol
+    PRAGMA_LOGON        = 138, // Used in Microsoft Telnet (may be in private range)
+    SSPI_LOGON          = 139, // SSPI-based login (Microsoft)
+    PRAGMA_HEARTBEAT    = 140, // Keep-alive negotiation
+    TOGGLE_FLOW_CONTROL = 33,  // Obsolete; similar to REMOTE_FLOW_CONTROL
+    X3_PAD              = 30,  // Transmit X.3 PAD parameters
+    MSDP                = 69,  // Mud Server Data Protocol (used in MUDs)
+    MSSP                = 70,  // Mud Server Status Protocol
+    ZMP                 = 93,  // Zenith Mud Protocol
+    MUX                 = 95,  // Legacy multi-session support
+    TERMINAL_SPEED      = 32   // Set terminal baud rate
+  };
 
   inline std::string readError(int rtntErrno) {
     if (rtntErrno < 200) { return strerror(errno); }
     switch (rtntErrno) {
-      case RTELNET_SUCCESS: return                            "No error.";
-      case RTELNET_TCP_ERROR_ADDRESS_NOT_VALID: return        "address is not valid.";
-      case RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
-      case RTELNET_TCP_ERROR_CONNECTION_CLOSED_R: return      "Connection closed by remote.";
-      case RTELNET_TCP_ERROR_NOT_CONNECTED: return            "connection failed, tcp session was not established.";
-      case RTELNET_TCP_ERROR_FAILED_SEND: return              "could not send message. (No errno just 0 bytes sent)";
-      case RTELNET_TCP_ERROR_PARTIAL_SEND: return             "message was sent partially.";
+      case RTELNET_SUCCESS: return                  "No error.";
+      case Errors::ADDRESS_NOT_VALID: return        "address is not valid.";
+      case Errors::CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
+      case Errors::CONNECTION_CLOSED_R: return      "Connection closed by remote.";
+      case Errors::NOT_CONNECTED: return            "connection failed, tcp session was not established.";
+      case Errors::FAILED_SEND: return              "could not send message. (No errno just 0 bytes sent)";
+      case Errors::PARTIAL_SEND: return             "message was sent partially.";
 
       // Telnet logic errors
-      case RTELNET_ERROR_NOT_A_NEGOTIATION: return            "a negotiation was called, yet server did not negotiate.";
-      case RTELNET_ERROR_NOT_NEGOTIATED: return               "negotiation is required, please negotiate first.";
-      case RTELNET_ERROR_NOT_LOGGED: return                   "login is required, please login and try again.";
-      case RTELNET_ERROR_FAILED_LOGIN: return                 "login failed, username or password are wrong.";
+      case Errors::NOT_A_NEGOTIATION: return        "a negotiation was called, yet server did not negotiate.";
+      case Errors::NOT_NEGOTIATED: return           "negotiation is required, please negotiate first.";
+      case Errors::NOT_LOGGED: return               "login is required, please login and try again.";
+      case Errors::FAILED_LOGIN: return             "login failed, username or password are wrong.";
 
       // rtelnet specific
-      case RTELNET_ERROR_CANT_FIND_EXPECTED: return           "cannot find expected substring in buffer.";
-      case RTELNET_ERROR_USERNAME_NOT_SET: return             "username was not set in object.";
-      case RTELNET_ERROR_PASSWORD_NOT_SET: return             "password was not set in object.";
-      case RTELNET_ERROR_IAC_READER_FAILED_NEGO: return       "IAC reader failed while re negotiating.";
-      case RTELNET_ERROR_SHARED_BUFFER_EMPTY: return          "Read failed, the shared buffer is empty.";
-      case RTELNET_ERROR_NEGOTIATION_TIMEOUT: return          "Timeout while waiting for negotiation.";
+      case Errors::CANT_FIND_EXPECTED: return       "cannot find expected substring in buffer.";
+      case Errors::USERNAME_NOT_SET: return         "username was not set in object.";
+      case Errors::PASSWORD_NOT_SET: return         "password was not set in object.";
+      case Errors::IAC_READER_FAILED_NEGO: return   "IAC reader failed while re negotiating.";
+      case Errors::SHARED_BUFFER_EMPTY: return      "Read failed, the shared buffer is empty.";
+      case Errors::NEGOTIATION_TIMEOUT: return      "Timeout while waiting for negotiation.";
 
-      default: return                                         "Unknonw error.";
+      default: return                               "Unknonw error.";
     }
   }
 
@@ -227,7 +229,7 @@ namespace rtnt {
       Logger(session* owner) : _owner(owner) {}
 
       template <typename T, typename... Rest>
-      void log(const std::string& title, const std::string& message, int level,
+      void log(const std::string_view& title, const std::string& message, int level,
               const std::string& name1, const T& val1, const Rest&... rest) {
         if (_owner->_debug < level) return;
 
@@ -242,8 +244,7 @@ namespace rtnt {
         std::cerr << ")" << std::endl;
       }
 
-      // --- Simple version for just message
-      inline void log(const std::string& title, const std::string& message, int level) {
+      inline void log(const std::string_view& title, const std::string& message, int level) {
         if (_owner->_debug < level) return;
 
         std::cerr << "\033[1;97m[\033[0m\033[1;96m"
@@ -251,6 +252,95 @@ namespace rtnt {
                   << "\033[0m\033[1;97m]:\033[0m "
                   << message
                   << std::endl;
+      }
+
+      inline void printTelnet(const std::vector<unsigned char>& buffer, int who) {
+        if (buffer.size() != 3 || buffer[0] != IAC || _owner->_debug < 3) {
+          return;
+        }
+      
+        auto cmdName = [](unsigned char code) -> const char* {
+          switch (static_cast<TelnetOptions>(code)) {
+            case TelnetCommands::DO: return "DO";
+            case TelnetCommands::DONT: return "DONT";
+            case TelnetCommands::WILL: return "WILL";
+            case TelnetCommands::WONT: return "WONT";
+            case TelnetCommands::SB: return "SB";
+            case TelnetCommands::SE: return "SE";
+            default: return "UNKNOWN_CMD";
+          }
+        };
+      
+        auto optName = [](unsigned char code) -> const char* {
+          switch (static_cast<TelnetOptions>(code)) {
+            case TelnetOptions::BINARY: return "BINARY";
+            case TelnetOptions::ECHO: return "ECHO";
+            case TelnetOptions::RCP: return "RCP";
+            case TelnetOptions::SGA: return "SUPPRESS_GO_AHEAD";
+            case TelnetOptions::NAMS: return "NAMS";
+            case TelnetOptions::STATUS: return "STATUS";
+            case TelnetOptions::TIMING_MARK: return "TIMING_MARK";
+            case TelnetOptions::RCTE: return "RCTE";
+            case TelnetOptions::NAOL: return "NAOL";
+            case TelnetOptions::NAOP: return "NAOP";
+            case TelnetOptions::NAOCRD: return "NAOCRD";
+            case TelnetOptions::NAOHTS: return "NAOHTS";
+            case TelnetOptions::NAOHTD: return "NAOHTD";
+            case TelnetOptions::NAOFFD: return "NAOFFD";
+            case TelnetOptions::NAOVTS: return "NAOVTS";
+            case TelnetOptions::NAOVTD: return "NAOVTD";
+            case TelnetOptions::NAOLFD: return "NAOLFD";
+            case TelnetOptions::EXTEND_ASCII: return "EXTEND_ASCII";
+            case TelnetOptions::LOGOUT: return "LOGOUT";
+            case TelnetOptions::BM: return "BYTE_MACRO";
+            case TelnetOptions::DET: return "DET";
+            case TelnetOptions::SUPDUP: return "SUPDUP";
+            case TelnetOptions::SUPDUP_OUTPUT: return "SUPDUP_OUTPUT";
+            case TelnetOptions::SEND_LOCATION: return "SEND_LOCATION";
+            case TelnetOptions::TERMINAL_TYPE: return "TERMINAL_TYPE";
+            case TelnetOptions::END_OF_RECORD: return "END_OF_RECORD";
+            case TelnetOptions::TACACS_UID: return "TACACS_UID";
+            case TelnetOptions::OUTPUT_MARKING: return "OUTPUT_MARKING";
+            case TelnetOptions::TTYLOC: return "TTYLOC";
+            case TelnetOptions::REMOTE_FLOW_CONTROL: return "REMOTE_FLOW_CONTROL";
+            case TelnetOptions::X_DISPLAY_LOCATION: return "X_DISPLAY_LOCATION";
+            case TelnetOptions::ENVIRONMENT_OPTION: return "ENVIRONMENT_OPTION";
+            case TelnetOptions::AUTHENTICATION: return "AUTHENTICATION";
+            case TelnetOptions::ENCRYPTION: return "ENCRYPTION";
+            case TelnetOptions::NEW_ENVIRON: return "NEW_ENVIRON";
+            case TelnetOptions::NAWS: return "NAWS";
+            case TelnetOptions::LINEMODE: return "LINEMODE";
+            case TelnetOptions::XAUTH: return "XAUTH";
+            case TelnetOptions::CHARSET: return "CHARSET";
+            case TelnetOptions::RSP: return "RSP";
+            case TelnetOptions::COM_PORT_CONTROL: return "COM_PORT_CONTROL";
+            case TelnetOptions::SUPPRESS_LOCAL_ECHO: return "SUPPRESS_LOCAL_ECHO";
+            case TelnetOptions::MCCP1: return "MCCP1";
+            case TelnetOptions::MCCP2: return "MCCP2";
+            case TelnetOptions::GMCP: return "GMCP";
+            case TelnetOptions::PRAGMA_LOGON: return "PRAGMA_LOGON";
+            case TelnetOptions::SSPI_LOGON: return "SSPI_LOGON";
+            case TelnetOptions::PRAGMA_HEARTBEAT: return "PRAGMA_HEARTBEAT";
+            case TelnetOptions::TOGGLE_FLOW_CONTROL: return "TOGGLE_FLOW_CONTROL";
+            case TelnetOptions::X3_PAD: return "X3_PAD";
+            case TelnetOptions::MSDP: return "MSDP";
+            case TelnetOptions::MSSP: return "MSSP";
+            case TelnetOptions::ZMP: return "ZMP";
+            case TelnetOptions::MUX: return "MUX";
+            case TelnetOptions::TERMINAL_SPEED: return "TERMINAL_SPEED";
+            default: return "UNKNOWN_OPT";
+          }
+        };
+
+        std::string results = 
+          std::string((who == 0) ? "CLIENT => " : "SERVER <= ") +
+          std::string(cmdName(static_cast<unsigned char>(buffer[1])))
+          + " " +
+          optName(static_cast<unsigned char>(buffer[2])) +
+          " (IAC " + std::to_string(buffer[1]) + " " + std::to_string(buffer[2]) + ")";
+        
+
+        log(RTELNET_LOG_PTELNET, results, 3);
       }
 
     private:
@@ -321,7 +411,6 @@ namespace rtnt {
       }
     };
 
-
     class tcp {
     public:
       tcp(session* owner) : _owner(owner) {}
@@ -331,7 +420,7 @@ namespace rtnt {
         server_address.sin_port = htons(_owner->_port);
 
         if (inet_pton(AF_INET, _owner->_address, &server_address.sin_addr) <= 0) {
-          return RTELNET_TCP_ERROR_ADDRESS_NOT_VALID;
+          return Errors::ADDRESS_NOT_VALID;
         }
         
         _owner->_logger.log(RTELNET_LOG_TCP_SET_ADDR, "Successfully set socket address.", 4, LV(_owner->_address), LV(_owner->_port));
@@ -341,7 +430,7 @@ namespace rtnt {
 
       inline unsigned int Connect(sockaddr_in& address) {
         int sockfd = socket((_owner->_ipv == 4) ? AF_INET : AF_INET6, SOCK_STREAM, 0);
-        if (sockfd < 0) return RTELNET_TCP_ERROR_CANNOT_ALOCATE_FD;
+        if (sockfd < 0) return Errors::CANNOT_ALOCATE_FD;
 
         errno = 0;
         if (connect(sockfd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) { return errno; }
@@ -359,13 +448,13 @@ namespace rtnt {
       }
 
       inline unsigned int SendBin(const std::vector<unsigned char>& message, int sendFlag = 0) const {
-        if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+        if (!_owner->_connected) return Errors::NOT_CONNECTED;
 
         errno = 0;
         ssize_t bytesSent = send(_owner->_fd, message.data(), message.size(), sendFlag);
 
-        if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
-        if (static_cast<size_t>(bytesSent) != message.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
+        if (bytesSent == 0) return Errors::FAILED_SEND;
+        if (static_cast<size_t>(bytesSent) != message.size()) return Errors::PARTIAL_SEND;
         if (bytesSent < 0) return errno;
 
         _owner->_logger.log(RTELNET_LOG_TCP_SEND_BIN, "Successfully sent message.", 4, LV(message), LV(sendFlag));
@@ -374,7 +463,7 @@ namespace rtnt {
       }
 
       inline unsigned int Send(const std::string& message, int sendFlag = 0) const {
-        if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+        if (!_owner->_connected) return Errors::NOT_CONNECTED;
 
         std::vector<unsigned char> buffer;
         buffer.reserve(message.size());
@@ -388,9 +477,9 @@ namespace rtnt {
         errno = 0;
         ssize_t bytesSent = send(_owner->_fd, buffer.data(), buffer.size(), sendFlag);
 
-        if (bytesSent == 0) return RTELNET_TCP_ERROR_FAILED_SEND;
+        if (bytesSent == 0) return Errors::FAILED_SEND;
         if (bytesSent < 0) return errno;
-        if (static_cast<size_t>(bytesSent) != buffer.size()) return RTELNET_TCP_ERROR_PARTIAL_SEND;
+        if (static_cast<size_t>(bytesSent) != buffer.size()) return Errors::PARTIAL_SEND;
 
         _owner->_logger.log(RTELNET_LOG_TCP_SEND, "Successfully sent message.", 4, LV(message), LV(sendFlag));
 
@@ -398,7 +487,7 @@ namespace rtnt {
       }
 
       inline unsigned int Read(std::vector<unsigned char>& buffer, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
-        if (!_owner->_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+        if (!_owner->_connected) return Errors::NOT_CONNECTED;
 
         buffer.resize(readSize);
 
@@ -421,7 +510,7 @@ namespace rtnt {
         ssize_t bytesRead = recv(_owner->_fd, reinterpret_cast<char*>(buffer.data()), readSize, recvFlag);
 
         if (bytesRead < 0) return errno;
-        if (bytesRead == 0) return RTELNET_TCP_ERROR_CONNECTION_CLOSED_R;
+        if (bytesRead == 0) return Errors::CONNECTION_CLOSED_R;
 
         buffer.resize(bytesRead);
  
@@ -495,7 +584,7 @@ namespace rtnt {
             _stopBackground = true; _backgroundError = status; break;
           }
 
-          if (buffer[0] == IAC) {
+          if (buffer[0] == TelnetCommands::IAC) {
             int negotiateStatus = Negotiate();
             if (negotiateStatus != RTELNET_SUCCESS) {
               _stopBackground = true;
@@ -516,7 +605,7 @@ namespace rtnt {
       auto start = std::chrono::steady_clock::now();
       while (!_negotiated) {
         if ((std::chrono::steady_clock::now() - start) > std::chrono::seconds(RTELNET_NEGOTIATION_TIMEOUT)) {
-          return RTELNET_ERROR_NEGOTIATION_TIMEOUT;
+          return Errors::NEGOTIATION_TIMEOUT;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
@@ -530,9 +619,9 @@ namespace rtnt {
     }
 
     unsigned int Execute(const std::string& command, std::string& buffer) {
-      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
-      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
-      if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
+      if (!_connected) return Errors::NOT_CONNECTED;
+      if (!_negotiated) return Errors::NOT_NEGOTIATED;
+      if (!_logged_in) return Errors::NOT_LOGGED;
 
       _logger.log(RTELNET_LOG_EXECUTE, "Trying to execute a command.", 2, LV(command));
 
@@ -546,6 +635,8 @@ namespace rtnt {
       auto lastRead = startTime;
 
       while (true) {
+        output.clear();
+
         unsigned int readStatus = Read(output);
         if (readStatus != RTELNET_SUCCESS) return readStatus;
 
@@ -569,9 +660,9 @@ namespace rtnt {
     }
 
     inline unsigned int FlushBanner() {
-      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
-      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
-      if (!_logged_in) return RTELNET_ERROR_NOT_LOGGED;
+      if (!_connected) return Errors::NOT_CONNECTED;
+      if (!_negotiated) return Errors::NOT_NEGOTIATED;
+      if (!_logged_in) return Errors::NOT_LOGGED;
       
       std::string buffer;
       unsigned int execStatus = Execute("\n", buffer);
@@ -601,7 +692,7 @@ namespace rtnt {
     /*        ---         Telnet commands        ---         */
 
     unsigned int Negotiate() {
-      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
+      if (!_connected) return Errors::NOT_CONNECTED;
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Trying to negotiate.", 2);
     
@@ -613,18 +704,18 @@ namespace rtnt {
         unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
         if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
 
-        // printTelnet(buffer, 1);
+        _logger.printTelnet(buffer, 1);
 
         ssize_t n = static_cast<ssize_t>(buffer.size());
         if (n < 3) {
           _negotiated = false;
-          return RTELNET_ERROR_SHARED_BUFFER_EMPTY;
+          return Errors::SHARED_BUFFER_EMPTY;
         }
 
         // If not a negotiation packet, exit
-        if (buffer[0] != IAC) {
+        if (buffer[0] != TelnetCommands::IAC) {
           if (!_negotiated) {
-            return RTELNET_ERROR_NOT_A_NEGOTIATION;
+            return Errors::NOT_A_NEGOTIATION;
           } else {
             break;
           }
@@ -638,124 +729,126 @@ namespace rtnt {
         unsigned char command = buffer[1];
         unsigned char option  = buffer[2];
         std::vector<unsigned char> response = {
-          static_cast<unsigned char>(IAC),
+          static_cast<unsigned char>(TelnetCommands::IAC),
           static_cast<unsigned char>(0),
           static_cast<unsigned char>(option)
         };
 
         switch (command) {
-          case DO:
+          case TelnetCommands::DO:
             switch (option) {
-              case BINARY:               response[1] = WILL; _binarySendEnabled = true; break;
-              case ECHO:                 response[1] = WONT; break;
-              case SGA:                  response[1] = WONT; break;
-              case STATUS:               response[1] = WONT; break;
-              case TIMING_MARK:          response[1] = WONT; break;
-              case TERMINAL_TYPE:        response[1] = WONT; break;
-              case NAWS:                 response[1] = WONT; break;
-              case LINEMODE:             response[1] = WONT; break;
-              case NEW_ENVIRON:          response[1] = WONT; break;
-              case X_DISPLAY_LOCATION:   response[1] = WONT; break;
-              case LOGOUT:               response[1] = WONT; break;
-              case ENVIRONMENT_OPTION:   response[1] = WONT; break;
-              case AUTHENTICATION:       response[1] = WONT; break;
-              case ENCRYPTION:           response[1] = WONT; break;
-              case RCP:                  response[1] = WONT; break;
-              case NAMS:                 response[1] = WONT; break;
-              case RCTE:                 response[1] = WONT; break;
-              case NAOL:                 response[1] = WONT; break;
-              case NAOP:                 response[1] = WONT; break;
-              case NAOCRD:               response[1] = WONT; break;
-              case NAOHTS:               response[1] = WONT; break;
-              case NAOHTD:               response[1] = WONT; break;
-              case NAOFFD:               response[1] = WONT; break;
-              case NAOVTS:               response[1] = WONT; break;
-              case NAOVTD:               response[1] = WONT; break;
-              case NAOLFD:               response[1] = WONT; break;
-              case EXTEND_ASCII:         response[1] = WONT; break;
-              case BM:                   response[1] = WONT; break;
-              case DET:                  response[1] = WONT; break;
-              case SUPDUP:               response[1] = WONT; break;
-              case SUPDUP_OUTPUT:        response[1] = WONT; break;
-              case SEND_LOCATION:        response[1] = WONT; break;
-              case END_OF_RECORD:        response[1] = WONT; break;
-              case TACACS_UID:           response[1] = WONT; break;
-              case OUTPUT_MARKING:       response[1] = WONT; break;
-              case TTYLOC:               response[1] = WONT; break;
-              case REMOTE_FLOW_CONTROL:  response[1] = WONT; break;
-              case TOGGLE_FLOW_CONTROL:  response[1] = WONT; break;
-              case X3_PAD:               response[1] = WONT; break;
-              case MSDP:                 response[1] = WONT; break;
-              case MSSP:                 response[1] = WONT; break;
-              case ZMP:                  response[1] = WONT; break;
-              case MUX:                  response[1] = WONT; break;
-              case MCCP1:                response[1] = WONT; break;
-              case MCCP2:                response[1] = WONT; break;
-              case GMCP:                 response[1] = WONT; break;
-              case PRAGMA_LOGON:         response[1] = WONT; break;
-              case SSPI_LOGON:           response[1] = WONT; break;
-              case PRAGMA_HEARTBEAT:     response[1] = WONT; break;
-              default:                   response[1] = WONT; break;
+              case TelnetOptions::BINARY:               response[1] = TelnetCommands::WILL; _binarySendEnabled = true; break;
+              case TelnetOptions::ECHO:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::SGA:                  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::STATUS:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TIMING_MARK:          response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TERMINAL_TYPE:        response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAWS:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::LINEMODE:             response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NEW_ENVIRON:          response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::X_DISPLAY_LOCATION:   response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::LOGOUT:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::ENVIRONMENT_OPTION:   response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::AUTHENTICATION:       response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::ENCRYPTION:           response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::RCP:                  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAMS:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::RCTE:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOL:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOP:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOCRD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOHTS:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOHTD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOFFD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOVTS:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOVTD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::NAOLFD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::EXTEND_ASCII:         response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::BM:                   response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::DET:                  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::SUPDUP:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::SUPDUP_OUTPUT:        response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::SEND_LOCATION:        response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::END_OF_RECORD:        response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TACACS_UID:           response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::OUTPUT_MARKING:       response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TTYLOC:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::REMOTE_FLOW_CONTROL:  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TOGGLE_FLOW_CONTROL:  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::X3_PAD:               response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::MSDP:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::MSSP:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::ZMP:                  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::MUX:                  response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::MCCP1:                response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::MCCP2:                response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::GMCP:                 response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::PRAGMA_LOGON:         response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::SSPI_LOGON:           response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::PRAGMA_HEARTBEAT:     response[1] = TelnetCommands::WONT; break;
+              case TelnetOptions::TERMINAL_SPEED:       response[1] = TelnetCommands::WONT; break;
+              default:                                  response[1] = TelnetCommands::WONT; break;
             }
             break;
 
-          case WILL:
+          case TelnetCommands::WILL:
             switch (option) {
-              case BINARY:               response[1] = DO; _binaryReceiveEnabled = true; break;
-              case ECHO:                 response[1] = DONT; break;
-              case SGA:                  response[1] = DONT; break;
-              case STATUS:               response[1] = DONT; break;
-              case TIMING_MARK:          response[1] = DONT; break;
-              case TERMINAL_TYPE:        response[1] = DONT; break;
-              case NAWS:                 response[1] = DONT; break;
-              case LINEMODE:             response[1] = DONT; break;
-              case NEW_ENVIRON:          response[1] = DONT; break;
-              case X_DISPLAY_LOCATION:   response[1] = DONT; break;
-              case LOGOUT:               response[1] = DONT; break;
-              case ENVIRONMENT_OPTION:   response[1] = DONT; break;
-              case AUTHENTICATION:       response[1] = DONT; break;
-              case ENCRYPTION:           response[1] = DONT; break;
-              case RCP:                  response[1] = DONT; break;
-              case NAMS:                 response[1] = DONT; break;
-              case RCTE:                 response[1] = DONT; break;
-              case NAOL:                 response[1] = DONT; break;
-              case NAOP:                 response[1] = DONT; break;
-              case NAOCRD:               response[1] = DONT; break;
-              case NAOHTS:               response[1] = DONT; break;
-              case NAOHTD:               response[1] = DONT; break;
-              case NAOFFD:               response[1] = DONT; break;
-              case NAOVTS:               response[1] = DONT; break;
-              case NAOVTD:               response[1] = DONT; break;
-              case NAOLFD:               response[1] = DONT; break;
-              case EXTEND_ASCII:         response[1] = DONT; break;
-              case BM:                   response[1] = DONT; break;
-              case DET:                  response[1] = DONT; break;
-              case SUPDUP:               response[1] = DONT; break;
-              case SUPDUP_OUTPUT:        response[1] = DONT; break;
-              case SEND_LOCATION:        response[1] = DONT; break;
-              case END_OF_RECORD:        response[1] = DONT; break;
-              case TACACS_UID:           response[1] = DONT; break;
-              case OUTPUT_MARKING:       response[1] = DONT; break;
-              case TTYLOC:               response[1] = DONT; break;
-              case REMOTE_FLOW_CONTROL:  response[1] = DONT; break;
-              case TOGGLE_FLOW_CONTROL:  response[1] = DONT; break;
-              case X3_PAD:               response[1] = DONT; break;
-              case MSDP:                 response[1] = DONT; break;
-              case MSSP:                 response[1] = DONT; break;
-              case ZMP:                  response[1] = DONT; break;
-              case MUX:                  response[1] = DONT; break;
-              case MCCP1:                response[1] = DONT; break;
-              case MCCP2:                response[1] = DONT; break;
-              case GMCP:                 response[1] = DONT; break;
-              case PRAGMA_LOGON:         response[1] = DONT; break;
-              case SSPI_LOGON:           response[1] = DONT; break;
-              case PRAGMA_HEARTBEAT:     response[1] = DONT; break;
-              default:                   response[1] = DONT; break;
+              case TelnetOptions::BINARY:               response[1] = TelnetCommands::DO; _binaryReceiveEnabled = true; break;
+              case TelnetOptions::ECHO:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::SGA:                  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::STATUS:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TIMING_MARK:          response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TERMINAL_TYPE:        response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAWS:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::LINEMODE:             response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NEW_ENVIRON:          response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::X_DISPLAY_LOCATION:   response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::LOGOUT:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::ENVIRONMENT_OPTION:   response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::AUTHENTICATION:       response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::ENCRYPTION:           response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::RCP:                  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAMS:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::RCTE:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOL:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOP:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOCRD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOHTS:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOHTD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOFFD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOVTS:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOVTD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::NAOLFD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::EXTEND_ASCII:         response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::BM:                   response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::DET:                  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::SUPDUP:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::SUPDUP_OUTPUT:        response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::SEND_LOCATION:        response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::END_OF_RECORD:        response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TACACS_UID:           response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::OUTPUT_MARKING:       response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TTYLOC:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::REMOTE_FLOW_CONTROL:  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TOGGLE_FLOW_CONTROL:  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::X3_PAD:               response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::MSDP:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::MSSP:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::ZMP:                  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::MUX:                  response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::MCCP1:                response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::MCCP2:                response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::GMCP:                 response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::PRAGMA_LOGON:         response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::SSPI_LOGON:           response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::PRAGMA_HEARTBEAT:     response[1] = TelnetCommands::DONT; break;
+              case TelnetOptions::TERMINAL_SPEED:       response[1] = TelnetCommands::DONT; break;
+              default:                                  response[1] = TelnetCommands::DONT; break;
             }
             break;
 
-          case WONT:
-          case DONT:
+          case TelnetCommands::WONT:
+          case TelnetCommands::DONT:
             // Add supprt for these later.
             break;
         }
@@ -763,17 +856,16 @@ namespace rtnt {
         
         _tcp.SendBin(response);
         _negotiated = true;
-        // printTelnet(response, 0);
+        _logger.printTelnet(response, 0);
       }
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Finished negotiation sequence.", 2);
       return RTELNET_SUCCESS;
     }
 
-
     unsigned int expectOutput(const std::string& expect, std::vector<unsigned char>& buffer) {
-        if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
-        if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
+        if (!_connected) return Errors::NOT_CONNECTED;
+        if (!_negotiated) return Errors::NOT_NEGOTIATED;
 
         for (int i = 0; i < 300; ++i) {
           unsigned int readStatus = Read(buffer);
@@ -793,14 +885,14 @@ namespace rtnt {
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        return RTELNET_ERROR_CANT_FIND_EXPECTED;
+        return Errors::CANT_FIND_EXPECTED;
     }
 
     inline unsigned int Login() {
-      if (!_connected) return RTELNET_TCP_ERROR_NOT_CONNECTED;
-      if (!_negotiated) return RTELNET_ERROR_NOT_NEGOTIATED;
-      if (_username.empty()) return RTELNET_ERROR_USERNAME_NOT_SET;
-      if (_password.empty()) return RTELNET_ERROR_PASSWORD_NOT_SET;
+      if (!_connected) return Errors::NOT_CONNECTED;
+      if (!_negotiated) return Errors::NOT_NEGOTIATED;
+      if (_username.empty()) return Errors::USERNAME_NOT_SET;
+      if (_password.empty()) return Errors::PASSWORD_NOT_SET;
 
       _logger.log(RTELNET_LOG_LOGIN, "Trying to login.", 2, LV(_username), LV(_password));
 
@@ -844,7 +936,7 @@ namespace rtnt {
 
 
           if (accumulated.find("Login incorrect") != std::string::npos) {
-              return RTELNET_ERROR_FAILED_LOGIN;
+              return Errors::FAILED_LOGIN;
           }
 
           // possible: detect prompt here, e.g., "$ " or "> "
