@@ -1,47 +1,41 @@
 #include "rtelnet.hpp"
 #include <iostream>
-#include <string>
 
-int main(int argc, char* argv[]) {
-  if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << " <address> <port>\n";
+using namespace rtnt;
+
+int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    std::cerr << "[ERROR]: Usage: " << argv[0] << " ADDRESS PORT \n";
     return 1;
   }
 
-  std::string address = argv[1];
-  int port = std::atoi(argv[2]);
+  session Session(argv[1], "example", "1234", std::atoi(argv[2]), 4, 4);
 
-  std::string username, password;
-  std::cout << "Username: ";
-  std::getline(std::cin, username);
-  std::cout << "Password: ";
-  std::getline(std::cin, password);
-
-  rtnt::session session(address.c_str(), username, password, port, 4, 4);
-  unsigned int connectionStatus = session.Connect();
-
-  if (session.isBackgroundError() || connectionStatus != RTELNET_SUCCESS) {
-    std::cerr << "Failed to connect. (" << rtnt::readError(connectionStatus) << ")\n";
-    std::cerr << "Background error: (" << rtnt::readError(session.getBackgroundError()) << ")\n";
+  unsigned int connectSuccess = Session.Connect();
+  if (connectSuccess != RTELNET_SUCCESS) {
+    std::cerr << "[CONNECTION_ERROR]: " << readError(connectSuccess) << "\n";
+    Session.throwErrorStack();
     return 1;
   }
 
-  session.FlushBanner();
-  
+  std::string buffer;
 
-  while (true) {
-    std::string input;
-    std::string output;
-    std::cout << "$ ";
-    std::getline(std::cin, input);
-    unsigned int execStatus = session.Execute(input, output);
-    if (execStatus != RTELNET_SUCCESS) {
-      std::cerr << "Failed to connect. (" << rtnt::readError(connectionStatus) << ")\n";
-      std::cerr << "Background error: (" << rtnt::readError(session.getBackgroundError()) << ")\n";
-      return 1;
-    }
-    std::cout << output << std::endl;
+  // Flush the banner
+  unsigned int fbSuccess = Session.Execute("\n", buffer);
+  if (fbSuccess != RTELNET_SUCCESS) {
+    std::cerr << "[EXEC_ERROR]: " << rtnt::readError(fbSuccess) << "\n";
+    Session.throwErrorStack();
+    return 1;
   }
 
+  // Execute command
+  unsigned int execSuccess = Session.Execute("ls -atl /demo", buffer);
+  if (execSuccess != RTELNET_SUCCESS) {
+    std::cerr << "[EXEC_ERROR]: " << rtnt::readError(execSuccess) << "\n";
+    Session.throwErrorStack();
+    return 1;
+  }
+
+  std::cout << buffer << "\n";
   return 0;
 }

@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
+#include <ostream>
 #include <string_view>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -31,6 +32,7 @@
 #include <mutex>
 
 #define LV(x) #x, x
+#define PUSH_ERROR(code) pushError(code, __LINE__, __func__)
 
 // DEFUALTS
 inline constexpr int RTELNET_SUCCESS             = 0;
@@ -51,7 +53,7 @@ inline constexpr std::string_view RTELNET_LOG_TCP_SEND_BIN = "TCP => SEND BIN";
 inline constexpr std::string_view RTELNET_LOG_TCP_SEND = "TCP => SEND";
 inline constexpr std::string_view RTELNET_LOG_TCP_READ = "TCP => READ";
 inline constexpr std::string_view RTELNET_LOG_CONNECT = "CONNECT";
-inline constexpr std::string_view RTELNET_LOG_EXECUTE = "EXECITE";
+inline constexpr std::string_view RTELNET_LOG_EXECUTE = "EXECUTE";
 inline constexpr std::string_view RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
 inline constexpr std::string_view RTELNET_LOG_LOGIN = "LOGIN";
 inline constexpr std::string_view RTELNET_LOG_IAC_READER = "IAC READER";
@@ -67,7 +69,7 @@ namespace rtnt {
   
     // 210 > : TCP connection errors.
     ADDRESS_NOT_VALID      = 210,
-    CANNOT_ALOCATE_FD      = 211,
+    CANNOT_ALLOCATE_FD      = 211,
     CONNECTION_CLOSED_R    = 212,
     NOT_CONNECTED          = 213,
     FAILED_SEND            = 214,
@@ -153,12 +155,12 @@ namespace rtnt {
     TERMINAL_SPEED      = 32   // Set terminal baud rate
   };
 
-  inline std::string readError(int rtntErrno) {
-    if (rtntErrno < 200) { return strerror(errno); }
+  inline std::string_view readError(int rtntErrno) {
+    if (rtntErrno < 200) return strerror(errno);
     switch (rtntErrno) {
       case RTELNET_SUCCESS: return                  "No error.";
       case Errors::ADDRESS_NOT_VALID: return        "address is not valid.";
-      case Errors::CANNOT_ALOCATE_FD: return        "cannot alocate a file descriptor.";
+      case Errors::CANNOT_ALLOCATE_FD: return        "cannot allocate a file descriptor.";
       case Errors::CONNECTION_CLOSED_R: return      "Connection closed by remote.";
       case Errors::NOT_CONNECTED: return            "connection failed, tcp session was not established.";
       case Errors::FAILED_SEND: return              "could not send message. (No errno just 0 bytes sent)";
@@ -178,7 +180,7 @@ namespace rtnt {
       case Errors::SHARED_BUFFER_EMPTY: return      "Read failed, the shared buffer is empty.";
       case Errors::NEGOTIATION_TIMEOUT: return      "Timeout while waiting for negotiation.";
 
-      default: return                               "Unknonw error.";
+      default: return                               "Unknown error.";
     }
   }
 
@@ -388,8 +390,6 @@ namespace rtnt {
         std::cerr << "\"";
       }
 
-
-
       template <typename K, typename V>
       void printNamedArg(const std::string& name, const std::map<K, V>& value, bool isFirst) {
         if (!isFirst) std::cerr << ", ";
@@ -411,6 +411,21 @@ namespace rtnt {
       }
     };
 
+    inline void throwErrorStack() {
+        std::cerr << "[Error Stack Trace]" << std::endl;
+
+        for (size_t i = 0; i < errorStack.size(); ++i) {
+            const auto& err = errorStack[i];
+
+            std::cerr << (i + 1 < errorStack.size() ? " ├─ " : " └─ ")
+                      << "#" << i
+                      << " [Code " << err.code << "] "
+                      << err.function << ":" << err.line
+                      << " → " << readError(err.code)
+                      << std::endl;
+        }
+    }
+
     class tcp {
     public:
       tcp(session* owner) : _owner(owner) {}
@@ -420,7 +435,7 @@ namespace rtnt {
         server_address.sin_port = htons(_owner->_port);
 
         if (inet_pton(AF_INET, _owner->_address, &server_address.sin_addr) <= 0) {
-          return Errors::ADDRESS_NOT_VALID;
+          return _owner->PUSH_ERROR(Errors::ADDRESS_NOT_VALID);
         }
         
         _owner->_logger.log(RTELNET_LOG_TCP_SET_ADDR, "Successfully set socket address.", 4, LV(_owner->_address), LV(_owner->_port));
@@ -430,10 +445,10 @@ namespace rtnt {
 
       inline unsigned int Connect(sockaddr_in& address) {
         int sockfd = socket((_owner->_ipv == 4) ? AF_INET : AF_INET6, SOCK_STREAM, 0);
-        if (sockfd < 0) return Errors::CANNOT_ALOCATE_FD;
+        if (sockfd < 0) return _owner->PUSH_ERROR(Errors::CANNOT_ALLOCATE_FD);
 
         errno = 0;
-        if (connect(sockfd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) { return errno; }
+        if (connect(sockfd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) { return _owner->PUSH_ERROR(errno); }
 
         _owner->_logger.log(RTELNET_LOG_TCP_CONNECT, "Successfully connected.", 4, LV(_owner->_address), LV(_owner->_port));
         
@@ -448,14 +463,14 @@ namespace rtnt {
       }
 
       inline unsigned int SendBin(const std::vector<unsigned char>& message, int sendFlag = 0) const {
-        if (!_owner->_connected) return Errors::NOT_CONNECTED;
+        if (!_owner->_connected) return _owner->PUSH_ERROR(Errors::NOT_CONNECTED);
 
         errno = 0;
         ssize_t bytesSent = send(_owner->_fd, message.data(), message.size(), sendFlag);
 
-        if (bytesSent == 0) return Errors::FAILED_SEND;
-        if (static_cast<size_t>(bytesSent) != message.size()) return Errors::PARTIAL_SEND;
-        if (bytesSent < 0) return errno;
+        if (bytesSent == 0) return _owner->PUSH_ERROR(Errors::FAILED_SEND);
+        if (static_cast<size_t>(bytesSent) != message.size()) return _owner->PUSH_ERROR(Errors::PARTIAL_SEND);
+        if (bytesSent < 0) return _owner->PUSH_ERROR(errno);
 
         _owner->_logger.log(RTELNET_LOG_TCP_SEND_BIN, "Successfully sent message.", 4, LV(message), LV(sendFlag));
 
@@ -463,7 +478,7 @@ namespace rtnt {
       }
 
       inline unsigned int Send(const std::string& message, int sendFlag = 0) const {
-        if (!_owner->_connected) return Errors::NOT_CONNECTED;
+        if (!_owner->_connected) return _owner->PUSH_ERROR(Errors::NOT_CONNECTED);
 
         std::vector<unsigned char> buffer;
         buffer.reserve(message.size());
@@ -477,9 +492,9 @@ namespace rtnt {
         errno = 0;
         ssize_t bytesSent = send(_owner->_fd, buffer.data(), buffer.size(), sendFlag);
 
-        if (bytesSent == 0) return Errors::FAILED_SEND;
-        if (bytesSent < 0) return errno;
-        if (static_cast<size_t>(bytesSent) != buffer.size()) return Errors::PARTIAL_SEND;
+        if (bytesSent == 0) return _owner->PUSH_ERROR(Errors::FAILED_SEND);
+        if (bytesSent < 0) return _owner->PUSH_ERROR(errno);
+        if (static_cast<size_t>(bytesSent) != buffer.size()) return _owner->PUSH_ERROR(Errors::PARTIAL_SEND);
 
         _owner->_logger.log(RTELNET_LOG_TCP_SEND, "Successfully sent message.", 4, LV(message), LV(sendFlag));
 
@@ -487,7 +502,7 @@ namespace rtnt {
       }
 
       inline unsigned int Read(std::vector<unsigned char>& buffer, int readSize = RTELNET_BUFFER_SIZE, int recvFlag = 0) const {
-        if (!_owner->_connected) return Errors::NOT_CONNECTED;
+        if (!_owner->_connected) return _owner->PUSH_ERROR(Errors::NOT_CONNECTED);
 
         buffer.resize(readSize);
 
@@ -500,7 +515,7 @@ namespace rtnt {
         timeout.tv_usec = 0;
 
         int ready = select(_owner->_fd + 1, &readfds, nullptr, nullptr, &timeout);
-        if (ready < 0) return errno;
+        if (ready < 0) return _owner->PUSH_ERROR(errno);
         if (ready == 0) {
           buffer.clear();
           return RTELNET_SUCCESS;
@@ -509,8 +524,8 @@ namespace rtnt {
         errno = 0;
         ssize_t bytesRead = recv(_owner->_fd, reinterpret_cast<char*>(buffer.data()), readSize, recvFlag);
 
-        if (bytesRead < 0) return errno;
-        if (bytesRead == 0) return Errors::CONNECTION_CLOSED_R;
+        if (bytesRead < 0) return _owner->PUSH_ERROR(errno);
+        if (bytesRead == 0) return _owner->PUSH_ERROR(Errors::CONNECTION_CLOSED_R);
 
         buffer.resize(bytesRead);
  
@@ -556,7 +571,7 @@ namespace rtnt {
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // avoid CPU spinning
-    }
+      }
     }
 
     inline unsigned int Connect() {
@@ -566,10 +581,10 @@ namespace rtnt {
       // Get address
       sockaddr_in address;
       unsigned int addressResult = _tcp.setSocketAddr(address);
-      if (addressResult != 0 ) { return addressResult; }
+      if (addressResult != 0 ) return PUSH_ERROR(addressResult);
 
       int fd = _tcp.Connect(address);
-      if (fd < 0) { return fd; }
+      if (fd < 0) return PUSH_ERROR(fd);
       _fd = fd;
       
       _background = std::thread([this]() {
@@ -605,13 +620,13 @@ namespace rtnt {
       auto start = std::chrono::steady_clock::now();
       while (!_negotiated) {
         if ((std::chrono::steady_clock::now() - start) > std::chrono::seconds(RTELNET_NEGOTIATION_TIMEOUT)) {
-          return Errors::NEGOTIATION_TIMEOUT;
+          return PUSH_ERROR(Errors::NEGOTIATION_TIMEOUT);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
 
       int loginStatus = Login();
-      if (loginStatus != RTELNET_SUCCESS) return loginStatus;
+      if (loginStatus != RTELNET_SUCCESS) return PUSH_ERROR(loginStatus);
 
       _logger.log(RTELNET_LOG_CONNECT, "Connected to telnet server.", 2, _address, _port);
  
@@ -619,14 +634,14 @@ namespace rtnt {
     }
 
     unsigned int Execute(const std::string& command, std::string& buffer) {
-      if (!_connected) return Errors::NOT_CONNECTED;
-      if (!_negotiated) return Errors::NOT_NEGOTIATED;
-      if (!_logged_in) return Errors::NOT_LOGGED;
+      if (!_connected) return PUSH_ERROR(Errors::NOT_CONNECTED);
+      if (!_negotiated) return PUSH_ERROR(Errors::NOT_NEGOTIATED);
+      if (!_logged_in) return PUSH_ERROR(Errors::NOT_LOGGED);
 
       _logger.log(RTELNET_LOG_EXECUTE, "Trying to execute a command.", 2, LV(command));
 
       unsigned int sendStatus = _tcp.Send(command + "\n");
-      if (sendStatus != RTELNET_SUCCESS) return sendStatus;
+      if (sendStatus != RTELNET_SUCCESS) return PUSH_ERROR(sendStatus);
 
       std::vector<unsigned char> output;
       buffer.clear();
@@ -660,13 +675,13 @@ namespace rtnt {
     }
 
     inline unsigned int FlushBanner() {
-      if (!_connected) return Errors::NOT_CONNECTED;
-      if (!_negotiated) return Errors::NOT_NEGOTIATED;
-      if (!_logged_in) return Errors::NOT_LOGGED;
+      if (!_connected) return PUSH_ERROR(Errors::NOT_CONNECTED);
+      if (!_negotiated) return PUSH_ERROR(Errors::NOT_NEGOTIATED);
+      if (!_logged_in) return PUSH_ERROR(Errors::NOT_LOGGED);
       
       std::string buffer;
       unsigned int execStatus = Execute("\n", buffer);
-      if (execStatus != RTELNET_SUCCESS) return execStatus;
+      if (execStatus != RTELNET_SUCCESS) return PUSH_ERROR(execStatus);
 
       return RTELNET_SUCCESS;
     }
@@ -691,8 +706,27 @@ namespace rtnt {
     bool _binaryReceiveEnabled = false; 
     /*        ---         Telnet commands        ---         */
 
+    struct errorEntry {
+      unsigned int code;
+      unsigned int line;
+      std::string function;
+    };
+
+    std::vector<errorEntry> errorStack;
+
+    unsigned int pushError(unsigned int code, unsigned int line, const std::string& function) {
+      errorEntry ee;
+      ee.code = code;
+      ee.line = line;
+      ee.function = function;
+
+      errorStack.push_back(ee); 
+
+      return code;
+    }
+
     unsigned int Negotiate() {
-      if (!_connected) return Errors::NOT_CONNECTED;
+      if (!_connected) return PUSH_ERROR(Errors::NOT_CONNECTED);
 
       _logger.log(RTELNET_LOG_NEGOTIATE, "Trying to negotiate.", 2);
     
@@ -702,20 +736,20 @@ namespace rtnt {
         // Peek in the buffer
         buffer.clear();
         unsigned int bufferPeek = _tcp.Read(buffer, 3, MSG_PEEK);
-        if (bufferPeek != RTELNET_SUCCESS) { return bufferPeek; }
+        if (bufferPeek != RTELNET_SUCCESS) return PUSH_ERROR(bufferPeek);
 
         _logger.printTelnet(buffer, 1);
 
         ssize_t n = static_cast<ssize_t>(buffer.size());
         if (n < 3) {
           _negotiated = false;
-          return Errors::SHARED_BUFFER_EMPTY;
+          return PUSH_ERROR(Errors::SHARED_BUFFER_EMPTY);
         }
 
         // If not a negotiation packet, exit
         if (buffer[0] != TelnetCommands::IAC) {
           if (!_negotiated) {
-            return Errors::NOT_A_NEGOTIATION;
+            return PUSH_ERROR(Errors::NOT_A_NEGOTIATION);
           } else {
             break;
           }
@@ -724,7 +758,7 @@ namespace rtnt {
         // Read the full 3-byte sequence
         buffer.clear();
         unsigned int bufferResult = _tcp.Read(buffer, 3);
-        if (bufferPeek != RTELNET_SUCCESS) { return bufferResult; }
+        if (bufferPeek != RTELNET_SUCCESS) return PUSH_ERROR(bufferResult);
 
         unsigned char command = buffer[1];
         unsigned char option  = buffer[2];
@@ -864,12 +898,12 @@ namespace rtnt {
     }
 
     unsigned int expectOutput(const std::string& expect, std::vector<unsigned char>& buffer) {
-        if (!_connected) return Errors::NOT_CONNECTED;
-        if (!_negotiated) return Errors::NOT_NEGOTIATED;
+        if (!_connected) return PUSH_ERROR(Errors::NOT_CONNECTED);
+        if (!_negotiated) return PUSH_ERROR(Errors::NOT_NEGOTIATED);
 
         for (int i = 0; i < 300; ++i) {
           unsigned int readStatus = Read(buffer);
-          if (readStatus != RTELNET_SUCCESS) return readStatus;
+          if (readStatus != RTELNET_SUCCESS) return PUSH_ERROR(readStatus);
 
           _logger.log("EXPECT", "Expecting.", 2, LV(expect) , LV(buffer));
 
@@ -885,14 +919,14 @@ namespace rtnt {
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        return Errors::CANT_FIND_EXPECTED;
+        return PUSH_ERROR(Errors::CANT_FIND_EXPECTED);
     }
 
     inline unsigned int Login() {
-      if (!_connected) return Errors::NOT_CONNECTED;
-      if (!_negotiated) return Errors::NOT_NEGOTIATED;
-      if (_username.empty()) return Errors::USERNAME_NOT_SET;
-      if (_password.empty()) return Errors::PASSWORD_NOT_SET;
+      if (!_connected) return PUSH_ERROR(Errors::NOT_CONNECTED);
+      if (!_negotiated) return PUSH_ERROR(Errors::NOT_NEGOTIATED);
+      if (_username.empty()) return PUSH_ERROR(Errors::USERNAME_NOT_SET);
+      if (_password.empty()) return PUSH_ERROR(Errors::PASSWORD_NOT_SET);
 
       _logger.log(RTELNET_LOG_LOGIN, "Trying to login.", 2, LV(_username), LV(_password));
 
@@ -901,16 +935,16 @@ namespace rtnt {
       // Enter login
       buffer.clear();
       unsigned int loginStatus = expectOutput("login:", buffer);
-      if (loginStatus != RTELNET_SUCCESS) return loginStatus;
+      if (loginStatus != RTELNET_SUCCESS) return PUSH_ERROR(loginStatus);
       unsigned int loginResponse = _tcp.Send(_username + "\n");
-      if (loginResponse != RTELNET_SUCCESS) return loginResponse;
+      if (loginResponse != RTELNET_SUCCESS) return PUSH_ERROR(loginResponse);
 
       // Enter password
       buffer.clear();
       unsigned int passwordStatus = expectOutput("Password:", buffer);
-      if (passwordStatus != RTELNET_SUCCESS) return passwordStatus;
+      if (passwordStatus != RTELNET_SUCCESS) return PUSH_ERROR(passwordStatus);
       unsigned int passwordResponse = _tcp.Send(_password + "\n");
-      if (passwordResponse != RTELNET_SUCCESS) return passwordResponse;
+      if (passwordResponse != RTELNET_SUCCESS) return PUSH_ERROR(passwordResponse);
 
       // Search for "Login incorrect"
       std::string accumulated;
@@ -922,7 +956,7 @@ namespace rtnt {
       while (true) {
 
           unsigned int readStatus = Read(buffer, RTELNET_BUFFER_SIZE, MSG_PEEK);
-          if (readStatus != RTELNET_SUCCESS) return readStatus;
+          if (readStatus != RTELNET_SUCCESS) return PUSH_ERROR(readStatus);
 
           if (!buffer.empty()) {
               std::string temp(reinterpret_cast<const char*>(buffer.data()), buffer.size());
@@ -936,7 +970,7 @@ namespace rtnt {
 
 
           if (accumulated.find("Login incorrect") != std::string::npos) {
-              return Errors::FAILED_LOGIN;
+              return PUSH_ERROR(Errors::FAILED_LOGIN);
           }
 
           // possible: detect prompt here, e.g., "$ " or "> "
