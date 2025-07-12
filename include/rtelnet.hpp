@@ -53,7 +53,7 @@ inline constexpr std::string_view RTELNET_LOG_TCP_SEND_BIN = "TCP => SEND BIN";
 inline constexpr std::string_view RTELNET_LOG_TCP_SEND = "TCP => SEND";
 inline constexpr std::string_view RTELNET_LOG_TCP_READ = "TCP => READ";
 inline constexpr std::string_view RTELNET_LOG_CONNECT = "CONNECT";
-inline constexpr std::string_view RTELNET_LOG_EXECUTE = "EXECITE";
+inline constexpr std::string_view RTELNET_LOG_EXECUTE = "EXECUTE";
 inline constexpr std::string_view RTELNET_LOG_NEGOTIATE = "NEGOTIATE";
 inline constexpr std::string_view RTELNET_LOG_LOGIN = "LOGIN";
 inline constexpr std::string_view RTELNET_LOG_IAC_READER = "IAC READER";

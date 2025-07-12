@@ -9,7 +9,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  session Session(argv[1], "example", "124", std::atoi(argv[2]));
+  session Session(argv[1], "example", "1234", std::atoi(argv[2]), 4, 4);
 
   unsigned int connectSuccess = Session.Connect();
   if (connectSuccess != RTELNET_SUCCESS) {
